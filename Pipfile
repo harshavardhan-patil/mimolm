@@ -1,0 +1,30 @@
+[packages]
+black = "*"
+flake8 = "*"
+ipython = "*"
+isort = "*"
+jupyterlab = "*"
+loguru = "*"
+matplotlib = "*"
+mkdocs = "*"
+notebook = "*"
+numpy = "*"
+pandas = "*"
+pip = "*"
+python-dotenv = "*"
+scikit-learn = "*"
+tqdm = "*"
+typer = "*"
+av2 = {git = "https://github.com/argoverse/av2-api", egg = "av2"}
+"src" ={editable = true, path = "."}
+h5py = "*"
+transforms3d = "*"
+torch = "*"
+torchvision = "*"
+transformers = "*"
+lightning = "*"
+
+[requires]
+python_version = "3.10.4"
+
+[dev-packages]
