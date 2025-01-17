@@ -32,14 +32,7 @@ class DatasetTrain(DatasetBase):
             for k, _size in self.tensor_size.items():
                 if k in hf[idx_key]:
                     out_dict[k] = np.ascontiguousarray(hf[idx_key][k])
-                else:
-                    if "/valid" in k or "/state" in k:
-                        _dtype = np.bool
-                    elif "/idx" in k:
-                        _dtype = np.int64
-                    else:
-                        _dtype = np.float32
-                    out_dict[k] = np.zeros(_size, dtype=_dtype)
+
         return out_dict
 
 
@@ -58,14 +51,7 @@ class DatasetVal(DatasetBase):
             for k, _size in self.tensor_size.items():
                 if k in hf[idx_key]:
                     out_dict[k] = np.ascontiguousarray(hf[idx_key][k])
-                else:
-                    if "/valid" in k or "/state" in k:
-                        _dtype = np.bool
-                    elif "/idx" in k:
-                        _dtype = np.int64
-                    else:
-                        _dtype = np.float32
-                    out_dict[k] = np.zeros(_size, dtype=_dtype)
+                
                 if out_dict[k].shape != _size:
                     assert "agent" in k
                     out_dict[k] = np.ones(_size, dtype=out_dict[k].dtype)
@@ -98,8 +84,6 @@ class DataH5av2(LightningDataModule):
         n_pl = 1024
         n_pl_node = 20
 
-        n_tl = 1
-        n_tl_stop = 1
         self.tensor_size_train = {
             # agent states
             "agent/valid": (n_step, n_agent),  # bool,
@@ -123,14 +107,6 @@ class DataH5av2(LightningDataModule):
             "map/pos": (n_pl, n_pl_node, 2),  # float32
             "map/dir": (n_pl, n_pl_node, 2),  # float32
             "map/boundary": (4,),  # xmin, xmax, ymin, ymax
-            # dummy traffic lights
-            "tl_lane/valid": (n_step, n_tl),  # bool
-            "tl_lane/state": (n_step, n_tl, 5),  # bool one_hot
-            "tl_lane/idx": (n_step, n_tl),  # int, -1 means not valid
-            "tl_stop/valid": (n_step, n_tl_stop),  # bool
-            "tl_stop/state": (n_step, n_tl_stop, 5),  # bool one_hot
-            "tl_stop/pos": (n_step, n_tl_stop, 2),  # x,y
-            "tl_stop/dir": (n_step, n_tl_stop, 2),  # x,y
         }
 
         self.tensor_size_test = {
@@ -162,14 +138,6 @@ class DataH5av2(LightningDataModule):
             "map/pos": (n_pl, n_pl_node, 2),  # float32
             "map/dir": (n_pl, n_pl_node, 2),  # float32
             "map/boundary": (4,),  # xmin, xmax, ymin, ymax
-            # dummy traffic_light
-            "history/tl_lane/valid": (n_step_history, n_tl),  # bool
-            "history/tl_lane/state": (n_step_history, n_tl, 5),  # bool one_hot
-            "history/tl_lane/idx": (n_step_history, n_tl),  # int, -1 means not valid
-            "history/tl_stop/valid": (n_step_history, n_tl_stop),  # bool
-            "history/tl_stop/state": (n_step_history, n_tl_stop, 5),  # bool one_hot
-            "history/tl_stop/pos": (n_step_history, n_tl_stop, 2),  # x,y
-            "history/tl_stop/dir": (n_step_history, n_tl_stop, 2),  # dx,dy
         }
 
         self.tensor_size_val = {
