@@ -12,7 +12,6 @@ class AgentCentricGlobal(nn.Module):
         time_step_current: int,
         data_size: DictConfig,
         dropout_p_history: float,
-        use_current_tl: bool,
         add_ohe: bool,
         pl_aggr: bool,
         pose_pe: DictConfig,
@@ -21,16 +20,13 @@ class AgentCentricGlobal(nn.Module):
         self.dropout_p_history = dropout_p_history  # [0, 1], turn off if set to negative
         self.step_current = time_step_current
         self.n_step_hist = time_step_current + 1
-        self.use_current_tl = use_current_tl
         self.add_ohe = add_ohe
         self.pl_aggr = pl_aggr
         self.n_pl_node = data_size["map/valid"][-1]
 
         self.pose_pe_agent = PosePE(pose_pe["agent"])
         self.pose_pe_map = PosePE(pose_pe["map"])
-        self.pose_pe_tl = PosePE(pose_pe["tl"])
 
-        tl_attr_dim = self.pose_pe_tl.out_dim + data_size["tl_stop/state"][-1]
         if self.pl_aggr:
             agent_attr_dim = (
                 self.pose_pe_agent.out_dim * self.n_step_hist
@@ -61,16 +57,12 @@ class AgentCentricGlobal(nn.Module):
             if not self.pl_aggr:
                 map_attr_dim += self.n_pl_node
                 agent_attr_dim += self.n_step_hist
-            if not self.use_current_tl:
-                tl_attr_dim += self.n_step_hist
 
         self.model_kwargs = {
             "agent_attr_dim": agent_attr_dim,
             "map_attr_dim": map_attr_dim,
-            "tl_attr_dim": tl_attr_dim,
             "n_step_hist": self.n_step_hist,
             "n_pl_node": self.n_pl_node,
-            "use_current_tl": self.use_current_tl,
             "pl_aggr": self.pl_aggr,
         }
 
@@ -120,11 +112,6 @@ class AgentCentricGlobal(nn.Module):
                 "ac/map_type": [n_scene, n_target, n_map, 11], bool one_hot
                 "ac/map_pos": [n_scene, n_target, n_map, n_pl_node, 2], float32
                 "ac/map_dir": [n_scene, n_target, n_map, n_pl_node, 2], float32
-            # traffic lights
-                "ac/tl_valid": [n_scene, n_target, n_step_hist, n_tl], bool
-                "ac/tl_state": [n_scene, n_target, n_step_hist, n_tl, 5], bool one_hot
-                "ac/tl_pos": [n_scene, n_target, n_step_hist, n_tl, 2], x,y
-                "ac/tl_dir": [n_scene, n_target, n_step_hist, n_tl, 2], x,y
 
         Returns: add following keys to batch Dict
             # target type: no need to be aggregated.
@@ -144,31 +131,12 @@ class AgentCentricGlobal(nn.Module):
                     "input/other_attr": [n_scene, n_target, n_other, n_step_hist, agent_attr_dim]
                     "input/map_valid": [n_scene, n_target, n_map, n_pl_node], bool
                     "input/map_attr": [n_scene, n_target, n_map, n_pl_node, map_attr_dim]
-            # traffic lights: stop point, cannot be aggregated, detections are not tracked, singular node polyline.
-                if use_current_tl:
-                    "input/tl_valid": [n_scene, n_target, 1, n_tl], bool
-                    "input/tl_attr": [n_scene, n_target, 1, n_tl, tl_attr_dim]
-                else:
-                    "input/tl_valid": [n_scene, n_target, n_step_hist, n_tl], bool
-                    "input/tl_attr": [n_scene, n_target, n_step_hist, n_tl, tl_attr_dim]
         """
         batch["input/target_type"] = batch["ac/target_type"]
         valid = batch["ac/target_valid"][:, :, [self.step_current]].unsqueeze(-1)  # [n_scene, n_target, 1, 1]
         batch["input/target_valid"] = batch["ac/target_valid"]  # [n_scene, n_target, n_step_hist]
         batch["input/other_valid"] = batch["ac/other_valid"] & valid  # [n_scene, n_target, n_other, n_step_hist]
-        batch["input/tl_valid"] = batch["ac/tl_valid"] & valid  # [n_scene, n_target, n_step_hist, n_tl]
         batch["input/map_valid"] = batch["ac/map_valid"] & valid  # [n_scene, n_target, n_map, n_pl_node]
-
-        # ! randomly mask history target/other/tl
-        if self.training and (0 < self.dropout_p_history <= 1.0):
-            prob_mask = torch.ones_like(batch["input/target_valid"][..., :-1]) * (1 - self.dropout_p_history)
-            batch["input/target_valid"][..., :-1] &= torch.bernoulli(prob_mask).bool()
-            prob_mask = torch.ones_like(batch["input/other_valid"]) * (1 - self.dropout_p_history)
-            batch["input/other_valid"] &= torch.bernoulli(prob_mask).bool()
-            prob_mask = torch.ones_like(batch["input/tl_valid"]) * (1 - self.dropout_p_history)
-            batch["input/tl_valid"] &= torch.bernoulli(prob_mask).bool()
-            prob_mask = torch.ones_like(batch["input/map_valid"]) * (1 - self.dropout_p_history)
-            batch["input/map_valid"] &= torch.bernoulli(prob_mask).bool()
 
         # ! prepare "input/target_attr"
         if self.pl_aggr:  # [n_scene, n_target, agent_attr_dim]
@@ -262,18 +230,6 @@ class AgentCentricGlobal(nn.Module):
                 dim=-1,
             )
 
-        # ! prepare "input/tl_attr": [n_scene, n_target, n_step_hist/1, n_tl, tl_attr_dim]
-        # [n_scene, n_target, n_step_hist, n_tl, 2]
-        tl_pos = batch["ac/tl_pos"]
-        tl_dir = batch["ac/tl_dir"]
-        tl_state = batch["ac/tl_state"]
-        if self.use_current_tl:
-            tl_pos = tl_pos[:, :, [-1]]  # [n_scene, n_target, 1, n_tl, 2]
-            tl_dir = tl_dir[:, :, [-1]]  # [n_scene, n_target, 1, n_tl, 2]
-            tl_state = tl_state[:, :, [-1]]  # [n_scene, n_target, 1, n_tl, 5]
-            batch["input/tl_valid"] = batch["input/tl_valid"][:, :, [-1]]  # [n_scene, n_target, 1, n_tl]
-        batch["input/tl_attr"] = torch.cat([self.pose_pe_tl(tl_pos, tl_dir), tl_state], dim=-1)
-
         # ! add one-hot encoding for sequence (temporal, order of polyline nodes)
         if self.add_ohe:
             n_scene, n_target, n_other, _ = batch["ac/other_valid"].shape
@@ -297,16 +253,6 @@ class AgentCentricGlobal(nn.Module):
                     [
                         batch["input/map_attr"],
                         self.pl_node_ohe[None, None, None, :, :].expand(n_scene, n_target, n_map, -1, -1),
-                    ],
-                    dim=-1,
-                )
-
-            if not self.use_current_tl:  # there is no need to add ohe if use_current_tl
-                n_tl = batch["input/tl_valid"].shape[-1]
-                batch["input/tl_attr"] = torch.cat(
-                    [
-                        batch["input/tl_attr"],
-                        self.history_step_ohe[None, None, :, None, :].expand(n_scene, n_target, -1, n_tl, -1),
                     ],
                     dim=-1,
                 )

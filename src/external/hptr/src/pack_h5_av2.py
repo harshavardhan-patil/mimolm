@@ -1,6 +1,4 @@
 # Licensed under the CC BY-NC 4.0 license (https://creativecommons.org/licenses/by-nc/4.0/)
-# Original https://github.com/zhejz/HPTR
-# tweaked for mimolm
 import sys
 
 sys.path.append(".")
@@ -89,8 +87,20 @@ N_STEP = 110
 
 
 def collate_agent_features(scenario_path, n_step):
-    tracks = scenario_serialization.load_argoverse_scenario_parquet(scenario_path).tracks
+    """Extracts agent-related features from a given scenario file and processes information about agents' IDs, types, roles, and states over a specified number of timesteps.
 
+    Args:
+        scenario_path (str): Path to the scenario .parquet file containing agent trajectory data.
+        n_step (int): Number of timesteps to include for each agent.
+
+    Returns:
+        agent_id (list[int]): List of unique IDs for the agents.
+        agent_type (list[int]): Encoded types of agents based on predefined categories (e.g., vehicle, pedestrian).
+        agent_states (list[list[list[float]]]) (num_agents, n_step, 10): Nested list containing agent states over n_step timesteps, where each state includes 10 features (e.g., position, size, velocity, validity flag).
+        agent_role (list[list[bool]]) (num_agents, 3): Encoded roles of agents ([sdc, interest, predict] flags).
+    """
+    tracks = scenario_serialization.load_argoverse_scenario_parquet(scenario_path).tracks
+    
     agent_id = []
     agent_type = []
     agent_states = []
@@ -137,6 +147,17 @@ def collate_agent_features(scenario_path, n_step):
 
 
 def collate_map_features(map_path):
+    """Generates map-related features from a static map file and processes lane boundaries, pedestrian crossings, and lane types to produce polylines and connectivity details for map elements.
+
+    Args:
+        map_path (str): Path to the map .json file containing static map information.
+
+    Returns:
+        mf_id (list[int]): IDs corresponding to map features (e.g., lane segments, crosswalks).
+        mf_xyz [num_ids, num_points, 3] (list[numpy.ndarray]): List of polylines representing spatial positions of map features..
+        mf_type (list[int]): Encoded types of map features based on predefined categories. See PL_TYPE for details.
+        mf_edge (list[list[int]]): Connectivity information between map elements (e.g., lane segment successors) in form of list of arrays. Array[0] connects to Array[1].
+    """
     static_map = ArgoverseStaticMap.from_json(map_path)
 
     def _interpolate_centerline(left_ln_boundary, right_ln_boundary):
@@ -241,6 +262,7 @@ def main():
             n_pl = pack_utils.pack_episode_map(
                 episode=episode, mf_id=mf_id, mf_xyz=mf_xyz, mf_type=mf_type, mf_edge=mf_edge, n_pl_max=N_PL_MAX
             )
+            print(episode)
             n_agent = pack_utils.pack_episode_agents(
                 episode=episode,
                 agent_id=agent_id,

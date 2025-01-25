@@ -16,14 +16,18 @@ scikit-learn = "*"
 tqdm = "*"
 typer = "*"
 av2 = {git = "https://github.com/argoverse/av2-api", egg = "av2"}
+scenarionet = {git = "https://github.com/metadriverse/scenarionet.git"}
 "src" ={editable = true, path = "."}
 h5py = "*"
 transforms3d = "*"
-torch = "*"
 torchvision = "*"
 transformers = "*"
 lightning = "*"
 omegaconf = "*"
+torch-geometric = "*"
+einops = "*"
+hydra-core = "*"
+torch = "*"
 
 [requires]
 python_version = "3.10.4"

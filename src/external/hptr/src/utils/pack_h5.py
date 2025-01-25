@@ -137,11 +137,28 @@ def pack_episode_map(
     n_nodes: int = 20,
 ) -> int:
     """
+    Populates the episode dictionary with map-related features by processing polylines, positions, directions, and connectivity data.
+
     Args:
-        mf_id: [polyline]
-        mf_xyz: [polyline, points, xyz]
-        mf_type: [polyline]
-        mf_edge: [edge, 2]
+        episode (Dict[str, np.ndarray]): Dictionary to store structured map-related features.
+        mf_id: [polyline] (list[int]): Polyline IDs.
+        mf_xyz: [polyline, points, xyz] (list[list[list[float]]]): Spatial positions for polylines.
+        mf_type: [polyline] (list[int]): Encoded types of map features with shape (polyline,).
+        mf_edge: [edge, 2] (list[list[int]]): Connectivity information with shape (edge, 2).
+        n_pl_max: (int): Maximum number of polylines to store in the episode.
+        n_nodes: (int): Maximum number of nodes per slice of a polyline. Defaults to 20.
+
+    Returns:
+        int: Number of polylines processed and stored in the episode.
+
+    Populates:
+        episode["map/valid"]: [n_pl_max, n_nodes] (np.ndarray): Boolean mask indicating valid points.
+        episode["map/id"]: [n_pl_max,] (np.ndarray): IDs of the polylines.
+        episode["map/type"]: [n_pl_max,] (np.ndarray): Encoded types of the polylines.
+        episode["map/pos"]: [n_pl_max, n_nodes, 3] (np.ndarray): Spatial positions of polyline points.
+        episode["map/dir"]: [n_pl_max, n_nodes, 3] (np.ndarray): Directional vectors between consecutive points.
+        episode["map/edge"]: [edge, 2] (np.ndarray): Connectivity information.
+
     """
     episode["map/valid"] = np.zeros([n_pl_max, n_nodes], dtype=bool)
     episode["map/id"] = np.zeros([n_pl_max], dtype=np.int64) - 1
@@ -187,12 +204,49 @@ def pack_episode_agents(
     n_agent_type: int = 3,
 ) -> None:
     """
+    Populates the episode dictionary with agent-related features by processing agent states, roles, and commands over multiple time steps.
+
     Args:
-        agent_id: [agents]
-        agent_type: [agents]
-        agent_states: [agents, step, 10]; x,y,z,l,w,h,heading,vx,vy,valid
-        agent_role: [agents, :], bool, [sdc=0]
+        episode (Dict[str, np.ndarray]): Dictionary to store structured agent-related features.
+        agent_id: [agents] (list[int]): IDs for agents.
+        agent_type: [agents] (list[int]): Encoded types of agents.
+        agent_states: [agents, step, 10] (list[list[list[float]]]): States for agents at each time step, containing [x, y, z, l, w, h, heading, vx, vy, valid].
+        agent_role: [agents, role_dim] (list[list[bool]]): Boolean indicators for agent roles, e.g., [sdc=0].
+        pack_all: (bool): Whether to pack all time steps of agent data into the episode dictionary.
+        pack_history: (bool): Whether to pack only the history up to the current time step into the episode dictionary.
+        n_agent_max: (int): Maximum number of agents to store in the episode.
+        step_current: (int): Index of the current time step.
+        n_agent_type: (int, optional): Maximum number of agent types. Defaults to 3.
+
+    Returns:
+        int: Total number of agents processed.
+
+    Populates:
+        episode["agent/valid"]: [n_step, n_agent_max] (np.ndarray): Boolean mask indicating valid agents at each time step.
+        episode["agent/pos"]: [n_step, n_agent_max, 3] (np.ndarray): Spatial positions of agents [x, y, z].
+        episode["agent/vel"]: [n_step, n_agent_max, 2] (np.ndarray): Velocity vectors [vx, vy] for agents.
+        episode["agent/spd"]: [n_step, n_agent_max, 1] (np.ndarray): Signed speeds of agents.
+        episode["agent/yaw_bbox"]: [n_step, n_agent_max, 1] (np.ndarray): Orientation angles of agents in radians.
+        episode["agent/object_id"]: [n_agent_max,] (np.ndarray): IDs for agents.
+        episode["agent/type"]: [n_agent_max, n_agent_type] (np.ndarray): One-hot encoded types of agents.
+        episode["agent/role"]: [n_agent_max, role_dim] (np.ndarray): Boolean roles for agents.
+        episode["agent/size"]: [n_agent_max, 3] (np.ndarray): Average dimensions of agents [length, width, height].
+        episode["agent/cmd"]: [n_agent_max, N_AGENT_CMD] (np.ndarray): One-hot encoded commands for agents.
+        episode["agent/goal"]: [n_agent_max, 4] (np.ndarray): Goal state for agents [x, y, yaw, speed].
+
+    If `pack_history` is True:
+        episode["history/agent/valid"]: [step_current + 1, n_agent_max] (np.ndarray): Historical boolean mask for valid agents.
+        episode["history/agent/pos"]: [step_current + 1, n_agent_max, 3] (np.ndarray): Historical spatial positions of agents.
+        episode["history/agent/vel"]: [step_current + 1, n_agent_max, 2] (np.ndarray): Historical velocity vectors for agents.
+        episode["history/agent/spd"]: [step_current + 1, n_agent_max, 1] (np.ndarray): Historical signed speeds of agents.
+        episode["history/agent/yaw_bbox"]: [step_current + 1, n_agent_max, 1] (np.ndarray): Historical orientation angles of agents in radians.
+        episode["history/agent/object_id"]: [n_agent_max,] (np.ndarray): IDs of agents in historical data.
+        episode["history/agent/type"]: [n_agent_max, n_agent_type] (np.ndarray): One-hot encoded agent types in historical data.
+        episode["history/agent/role"]: [n_agent_max, role_dim] (np.ndarray): Roles of agents in historical data.
+        episode["history/agent/size"]: [n_agent_max, 3] (np.ndarray): Dimensions of agents in historical data.
+        
     """
+
     n_step = len(agent_states[0])
     data_agent_valid = np.zeros([n_step, n_agent_max], dtype=bool)
     data_agent_pos = np.zeros([n_step, n_agent_max, 3], dtype=np.float32)

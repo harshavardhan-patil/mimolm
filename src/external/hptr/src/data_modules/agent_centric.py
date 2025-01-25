@@ -14,7 +14,6 @@ class AgentCentricPreProcessing(nn.Module):
         n_target: int,
         n_other: int,
         n_map: int,
-        n_tl: int,
         mask_invalid: bool,
     ) -> None:
         super().__init__()
@@ -23,7 +22,6 @@ class AgentCentricPreProcessing(nn.Module):
         self.n_target = n_target
         self.n_other = n_other
         self.n_map = n_map
-        self.n_tl = n_tl
         self.mask_invalid = mask_invalid
         self.model_kwargs = {"gt_in_local": True, "agent_centric": True}
 
@@ -47,12 +45,7 @@ class AgentCentricPreProcessing(nn.Module):
                 "map/type": [n_scene, n_pl, 11], bool one_hot
                 "map/pos": [n_scene, n_pl, n_pl_node, 2], float32
                 "map/dir": [n_scene, n_pl, n_pl_node, 2], float32
-            # traffic lights
-                "tl_stop/valid": [n_scene, n_step, n_tl_stop], bool
-                "tl_stop/state": [n_scene, n_step, n_tl_stop, 5], bool one_hot
-                "tl_stop/pos": [n_scene, n_step, n_tl_stop, 2], x,y
-                "tl_stop/dir": [n_scene, n_step, n_tl_stop, 2], x,y
-
+                
         Returns: agent-centric Dict, masked according to valid
             # (ref) reference information for transform back to global coordinate and submission to waymo
                 "ref/pos": [n_scene, n_target, 1, 2]
@@ -97,11 +90,6 @@ class AgentCentricPreProcessing(nn.Module):
                 "ac/map_type": [n_scene, n_target, n_map, 11], bool one_hot
                 "ac/map_pos": [n_scene, n_target, n_map, n_pl_node, 2], float32
                 "ac/map_dir": [n_scene, n_target, n_map, n_pl_node, 2], float32
-            # traffic lights
-                "ac/tl_valid": [n_scene, n_target, n_step_hist, n_tl], bool
-                "ac/tl_state": [n_scene, n_target, n_step_hist, n_tl, 5], bool one_hot
-                "ac/tl_pos": [n_scene, n_target, n_step_hist, n_tl, 2], x,y
-                "ac/tl_dir": [n_scene, n_target, n_step_hist, n_tl, 2], x,y
         """
         prefix = "" if self.training else "history/"
         n_scene = batch[prefix + "agent/valid"].shape[0]
@@ -234,38 +222,6 @@ class AgentCentricPreProcessing(nn.Module):
         batch["ac/map_pos"] = torch_pos2local(batch["ac/map_pos"], ref_pos.unsqueeze(2), ref_rot.unsqueeze(2))
         batch["ac/map_dir"] = torch_dir2local(batch["ac/map_dir"], ref_rot.unsqueeze(2))
 
-        # ! prepare agent-centric traffic lights
-        # [n_scene, n_step_hist, n_tl_stop, 2], [n_scene, n_target, 1, 2]
-        tl_dist = torch.norm(
-            batch[prefix + "tl_stop/pos"][:, : self.n_step_hist].unsqueeze(1) - ref_pos.unsqueeze(2), dim=-1
-        )
-        # [n_scene, n_target, n_step_hist, n_tl_stop]
-        tl_dist.masked_fill_(~batch[prefix + "tl_stop/valid"][:, : self.n_step_hist].unsqueeze(1), float("inf"))
-        # [n_scene, n_target, n_step_hist, n_tl]
-        tl_dist, tl_indices = torch.topk(tl_dist, self.n_tl, largest=False, dim=-1)
-        tl_scene_indices = torch.arange(n_scene)[:, None, None, None]  # [n_scene, 1, 1, 1]
-        tl_target_indices = torch.arange(self.n_target)[None, :, None, None]  # [1, n_target, 1, 1]
-        tl_step_indices = torch.arange(tl_indices.shape[2])[None, None, :, None]  # [1, 1, n_target, 1]
-
-        # [n_scene, n_step, n_tl_stop] -> [n_scene, n_target, n_step_hist, n_tl]
-        batch["ac/tl_valid"] = (
-            batch[prefix + "tl_stop/valid"][:, : self.n_step_hist]
-            .unsqueeze(1)
-            .repeat(1, self.n_target, 1, 1)[tl_scene_indices, tl_target_indices, tl_step_indices, tl_indices]
-        )
-        batch["ac/tl_valid"] = batch["ac/tl_valid"] & (tl_dist < 1e3)
-        # [n_scene, n_step, n_tl_stop, :] -> [n_scene, n_target, n_step_hist, n_tl, :]
-        for k in ("pos", "dir", "state"):
-            batch[f"ac/tl_{k}"] = (
-                batch[f"{prefix}tl_stop/{k}"][:, : self.n_step_hist]
-                .unsqueeze(1)
-                .repeat(1, self.n_target, 1, 1, 1)[tl_scene_indices, tl_target_indices, tl_step_indices, tl_indices]
-            )
-        # target_pos: [n_scene, n_target, 1, 2], target_rot: [n_scene, n_target, 2, 2]
-        # [n_scene, n_target, n_step_hist, n_tl, 2]
-        batch["ac/tl_pos"] = torch_pos2local(batch["ac/tl_pos"], ref_pos.unsqueeze(2), ref_rot.unsqueeze(2))
-        batch["ac/tl_dir"] = torch_dir2local(batch["ac/tl_dir"], ref_rot.unsqueeze(2))
-
         if self.mask_invalid:
             self.zero_mask_invalid(batch)
         return batch
@@ -289,11 +245,6 @@ class AgentCentricPreProcessing(nn.Module):
         batch["ac/map_dir"] = batch["ac/map_dir"].masked_fill(map_invalid, 0)
         map_invalid = ~(batch["ac/map_valid"].any(-1, keepdim=True))
         batch["ac/map_type"] = batch["ac/map_type"].masked_fill(map_invalid, 0)
-
-        tl_invalid = ~batch["ac/tl_valid"].unsqueeze(-1)
-        for k in ["state", "pos", "dir"]:
-            _key = f"ac/tl_{k}"
-            batch[_key] = batch[_key].masked_fill(tl_invalid, 0)
 
         gt_invalid = ~batch["gt/valid"].unsqueeze(-1)
         for k in ["pos", "spd", "vel", "yaw_bbox"]:
