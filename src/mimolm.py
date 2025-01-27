@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 import torch.nn.functional as F
+import torch.nn as nn
 
 from typing import Tuple
 from torch import nn, Tensor
@@ -13,6 +14,7 @@ from src.external.hptr.src.models.modules.transformer import TransformerBlock
 from src.external.hptr.src.models.modules.multi_modal import MultiModalAnchors
 
 from src.modeling.modules.lm_utils import create_vocabulary, tokenize_motion, get_attention_mask
+from src.modeling.modules.transformer import TransformerDecoder
 
 class MimoLM(nn.Module):
     def __init__(
@@ -86,29 +88,14 @@ class MimoLM(nn.Module):
     ) -> Tuple[Tensor, Tensor, Tensor]:
         """
         Args:
-           target_type: [n_scene, n_target, 3]
+            target_type: [n_scene, n_target, 3]
             # target history, other history, map
-                if pl_aggr:
-                    target_valid: [n_scene, n_target], bool
-                    target_attr: [n_scene, n_target, agent_attr_dim]
-                    other_valid: [n_scene, n_target, n_other], bool
-                    other_attr: [n_scene, n_target, n_other, agent_attr_dim]
-                    map_valid: [n_scene, n_target, n_map], bool
-                    map_attr: [n_scene, n_target, n_map, map_attr_dim]
-                else:
-                    target_valid: [n_scene, n_target, n_step_hist], bool
-                    target_attr: [n_scene, n_target, n_step_hist, agent_attr_dim]
-                    other_valid: [n_scene, n_target, n_other, n_step_hist], bool
-                    other_attr: [n_scene, n_target, n_other, n_step_hist, agent_attr_dim]
-                    map_valid: [n_scene, n_target, n_map, n_pl_node], bool
-                    map_attr: [n_scene, n_target, n_map, n_pl_node, map_attr_dim]
-            # traffic lights: cannot be aggregated, detections are not tracked.
-                if use_current_tl:
-                    tl_valid: [n_scene, n_target, 1, n_tl], bool
-                    tl_attr: [n_scene, n_target, 1, n_tl, tl_attr_dim]
-                else:
-                    tl_valid: [n_scene, n_target, n_step_hist, n_tl], bool
-                    tl_attr: [n_scene, n_target, n_step_hist, n_tl, tl_attr_dim]
+            target_valid: [n_scene, n_target, n_step_hist], bool
+            target_attr: [n_scene, n_target, n_step_hist, agent_attr_dim]
+            other_valid: [n_scene, n_target, n_other, n_step_hist], bool
+            other_attr: [n_scene, n_target, n_other, n_step_hist, agent_attr_dim]
+            map_valid: [n_scene, n_target, n_map, n_pl_node], bool
+            map_attr: [n_scene, n_target, n_map, n_pl_node, map_attr_dim]
 
         Returns: will be compared to "output/gt_pos": [n_scene, n_agent, n_step_future, 2]
             valid: [n_scene, n_target]
@@ -289,7 +276,7 @@ class EarlyFusionEncoder(nn.Module):
 
         return emb, emb_invalid
 
-#to-do: reducing the sampling rate of the predictions?
+#to-do: reducing the sampling rate of the predictions
 class MotionDecoder(nn.Module):
     def __init__(
             self,
@@ -300,7 +287,10 @@ class MotionDecoder(nn.Module):
             n_time_steps: int = 110,
             n_target: int = 6, #should be same as AgentCentricProcessing
             time_step_end: int = 49,
-            dropout: int = 0.0
+            dropout_rate: int = 0.0,
+            n_rollouts: int = 64,
+            n_heads: int = 2,
+            n_layers: int = 1,
             ) -> None:
         super().__init__()
 
@@ -310,7 +300,11 @@ class MotionDecoder(nn.Module):
         self.emb_dim = emb_dim
         self.n_time_steps = n_time_steps
         self.n_target = n_target
-        self.dropout = dropout
+        self.dropout_rate = dropout_rate
+        self.n_rollouts = n_rollouts
+        self.n_agents = 0
+        self.n_batch = 0
+        self.n_heads = n_heads
 
         self.vocabulary, self.pos_bins, self.verlet_wrapper = create_vocabulary(self.max_delta, 
                                                                                 self.n_quantization_bins, 
@@ -322,58 +316,53 @@ class MotionDecoder(nn.Module):
         self.step_emb_layer = nn.Embedding(self.n_time_steps, self.emb_dim)
         self.type_emb_layer = nn.Embedding(3, self.emb_dim)
 
-        self.self_attn_mask = get_attention_mask(n_time_steps=self.n_time_steps)
-        self.self_attn_layer = nn.MultiheadAttention(embed_dim = self.emb_dim, 
-                                        num_heads = 2,
-                                        dropout = dropout,
-                                        batch_first=True)
+        self.decoder_layers = nn.ModuleList(
+            [TransformerDecoder(num_heads=self.n_heads,
+                                emb_dim=self.emb_dim,
+                                dropout_rate=self.dropout_rate,
+                                n_time_steps=self.n_time_steps,
+                                n_rollouts=self.n_rollouts) for _ in range(n_layers)]
+        )
 
-        self.layer_norm_1 = nn.LayerNorm(normalized_shape = self.emb_dim)
-
-        self.cross_attn = nn.MultiheadAttention(embed_dim = self.emb_dim, 
-                                                num_heads = 2,
-                                                dropout = dropout,
-                                                batch_first=True)
-        self.layer_norm_2 = nn.LayerNorm(normalized_shape = self.emb_dim)
-        self.ffn_1 = nn.Linear(in_features=self.emb_dim, 
-                               out_features=emb_dim)
+        self.fully_connected_layers = nn.Sequential(
+            nn.Linear(self.emb_dim, 1024),
+            nn.GELU(),
+            nn.Linear(1024, 512),
+            nn.GELU(),
+            nn.Linear(512, 256),
+            nn.GELU(),
+            nn.Linear(256, self.vocab_size)
+        )
     
     def forward(
             self,
-            motion_tokens: Tensor,
+            motion_tokens: Tensor, # [n_batch, n_agents, n_time_steps, 2]
             target_types: Tensor,
             fused_emb: Tensor,
             fused_emb_invalid: Tensor,
             ) -> Tuple[Tensor, Tensor]:
 
-        motion_tokens = tokenize_motion(motion_tokens, 
+        self.n_agents = motion_tokens.shape[1]
+        self.n_batch = motion_tokens.shape[0]
+        motion_tokens = tokenize_motion(motion_tokens, # [n_batch, n_agents, n_time_steps]
                                         self.pos_bins, 
                                         self.verlet_wrapper, 
                                         self.n_verlet_steps, 
                                         self.n_time_steps)
+        print(motion_tokens.shape)
         # we compute a learned value embedding and two learned positional embeddings (representing the timestep and agent identity) for each discrete motion token, which are combined via an element-wise sum prior to being input to the transformer decoder.
         val_embeddings = self.val_emb_layer(motion_tokens)
-        step_embeddings = self.step_emb_layer(self.time_indices
-                                              .unsqueeze(0)
-                                              .repeat(motion_tokens.shape[0], 1))
+        step_embeddings = self.step_emb_layer(self.time_indices).unsqueeze(0).repeat(motion_tokens.shape[1], 1, 1).unsqueeze(0).repeat(motion_tokens.shape[0], 1, 1, 1)
         type_embeddings = self.type_emb_layer(target_types
-                                              .reshape(-1, 3)
-                                              .int().argmax(dim=-1)).unsqueeze(1).repeat(1, self.n_time_steps, 1)
-        motion_tokens = (val_embeddings + step_embeddings + type_embeddings).reshape((-1, self.emb_dim))
-        #this changes
-        # s_attn_out, _ = self.self_attn_layer(query = motion_tokens, 
-        #                                     key = motion_tokens, 
-        #                                     value = motion_tokens, 
-        #                                     attn_mask = self.self_attn_mask)
-        # s_attn_out_1 = self.layer_norm_1(motion_tokens + s_attn_out)
+                                              .int().argmax(dim=-1)).unsqueeze(2).repeat(1, 1, self.n_time_steps, 1)
+        motion_embeddings = (val_embeddings + step_embeddings + type_embeddings).flatten(1, 2) # [n_batch, n_agents * n_time_steps, emb_dim]
+        attn_mask = get_attention_mask(self.n_time_steps, motion_embeddings.shape[1])
+        query = motion_embeddings
+        for decoder_block in self.decoder_layers:
+            query = decoder_block(query = query, 
+                                  key = fused_emb, 
+                                  attn_mask = attn_mask,
+                                  n_agents = motion_tokens.shape[1])
 
-        # # cross attend each motion token to corresponding scene embeddings, output - [n_batch * n_target, n_time_steps, embed_dim]
-        # c_attn_out, _ = self.cross_attn(query = s_attn_out_1, 
-        #                                 key = fused_emb, 
-        #                                 value = fused_emb, 
-        #                                 key_padding_mask = fused_emb_invalid)
-        # c_attn_out_1 = self.layer_norm_2(s_attn_out_1 + c_attn_out)
-        # ffn_out_1 = F.relu(self.ffn_1(c_attn_out_1))
-
-        # return ffn_out_1
-        return motion_tokens
+        out = self.fully_connected_layers(query)
+        return out
