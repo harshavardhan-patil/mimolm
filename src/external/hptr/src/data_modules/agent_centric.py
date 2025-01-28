@@ -148,8 +148,8 @@ class AgentCentricPreProcessing(nn.Module):
             batch["gt/vel"] = torch_dir2local(batch["gt/vel"], ref_rot)
             # [n_scene, n_target, n_step_hist, 1]
             batch["gt/yaw_bbox"] = torch_rad2local(batch["gt/yaw_bbox"], ref_yaw.unsqueeze(-1), cast=False)
-            # [n_scene, n_agent, :] -> [n_scene, n_target, :]
-            batch["gt/cmd"] = batch["agent/cmd"][scene_indices, target_indices]
+            # [n_scene, n_agent, :] -> [n_scene, n_target, :] why?
+            # batch["gt/cmd"] = batch["agent/cmd"][scene_indices, target_indices]
 
         # ! prepare scene_indices and target_indices for other agents
         # [n_scene, n_step, n_agent] -> [n_scene, 1, n_agent, n_step_hist]

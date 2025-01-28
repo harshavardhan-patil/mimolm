@@ -82,7 +82,7 @@ class AgentCentricGlobal(nn.Module):
                 "gt/spd": [n_scene, n_target, n_step_future, 1]
                 "gt/vel": [n_scene, n_target, n_step_future, 2]
                 "gt/yaw_bbox": [n_scene, n_target, n_step_future, 1]
-                "gt/cmd": [n_scene, n_target, 8]
+                "gt/cmd": [n_scene, n_target, 8] removed this for n ow
             # (ac) agent-centric target agents states
                 "ac/target_valid": [n_scene, n_target, n_step_hist]
                 "ac/target_pos": [n_scene, n_target, n_step_hist, 2]

@@ -28,6 +28,7 @@ torch-geometric = "*"
 einops = "*"
 hydra-core = "*"
 torch = "*"
+tensordict = "*"
 
 [requires]
 python_version = "3.10.4"

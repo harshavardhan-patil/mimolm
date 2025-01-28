@@ -18,6 +18,7 @@ from src.external.hptr.src.data_modules.ac_global import AgentCentricGlobal
 
 from src.modeling.modules.lm_utils import create_vocabulary, tokenize_motion, get_attention_mask
 from src.modeling.modules.transformer import TransformerDecoder
+from tensordict import TensorDict
 
 class MimoLM(pl.LightningModule):
     def __init__(
@@ -105,6 +106,27 @@ class MimoLM(pl.LightningModule):
         total_params = sum([np.prod(p.size()) for p in model_parameters])
         print(f"Decoder parameters: {total_params/1000000:.2f}M")
 
+    def on_before_batch_transfer(self, batch, idx):
+        batch_tensor = TensorDict({
+                    "agent/valid": batch["agent/valid"],
+                    "agent/pos": batch["agent/pos"],
+                    "agent/vel": batch["agent/vel"],
+                    "agent/spd": batch["agent/spd"],
+                    "agent/acc": batch["agent/acc"],
+                    "agent/yaw_bbox": batch["agent/yaw_bbox"],
+                    "agent/yaw_rate": batch["agent/yaw_rate"],
+                # agent attributes
+                    "agent/type": batch["agent/type"],
+                    "agent/role": batch["agent/role"],
+                    "agent/size": batch["agent/size"],
+                # map polylines
+                    "map/valid": batch["map/valid"],
+                    "map/type": batch["map/type"],
+                    "map/pos": batch["map/pos"],
+                    "map/dir": batch["map/dir"]
+        })
+        return batch_tensor
+
     def training_step(self, batch, **kwargs):
         with torch.no_grad():
             batch = self.preprocessor(batch)
@@ -135,6 +157,8 @@ class MimoLM(pl.LightningModule):
         loss = self.criterion(
             self.logsoftmax(pred[:, 50:, :].flatten(0, 1)), 
             actuals.flatten(0, 1).flatten(0, 1).repeat(64))
+        
+        self.log("train_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
         return loss
 
     def configure_optimizers(self):

@@ -262,7 +262,6 @@ def main():
             n_pl = pack_utils.pack_episode_map(
                 episode=episode, mf_id=mf_id, mf_xyz=mf_xyz, mf_type=mf_type, mf_edge=mf_edge, n_pl_max=N_PL_MAX
             )
-            print(episode)
             n_agent = pack_utils.pack_episode_agents(
                 episode=episode,
                 agent_id=agent_id,
