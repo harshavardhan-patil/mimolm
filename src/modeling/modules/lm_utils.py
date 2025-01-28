@@ -2,7 +2,7 @@ import itertools
 import torch
 
 def create_vocabulary(max_delta, n_quantization_bins, n_verlet_steps):
-    bins = [torch.linspace(-max_delta, max_delta, steps=n_quantization_bins),torch.linspace(-max_delta, max_delta, steps=n_quantization_bins),]
+    bins = torch.stack((torch.linspace(-max_delta, max_delta, steps=n_quantization_bins), torch.linspace(-max_delta, max_delta, steps=n_quantization_bins)))
     verlet_wrapper = torch.linspace(-n_verlet_steps // 2 + 1, n_verlet_steps // 2, steps=n_verlet_steps)
 
     cartesian_product = list(itertools.product(torch.arange(n_verlet_steps), torch.arange(n_verlet_steps)))
@@ -11,8 +11,8 @@ def create_vocabulary(max_delta, n_quantization_bins, n_verlet_steps):
     for i, j in cartesian_product:
         vocabulary[k] = [i * n_verlet_steps + j, i, j]
         k+=1
-        
-    return vocabulary, bins, verlet_wrapper
+
+    return torch.tensor(vocabulary), bins, verlet_wrapper
 
 
 def tokenize_motion(motion_tokens, vocabulary, verlet_wrapper, n_verlet_steps, n_time_steps):
