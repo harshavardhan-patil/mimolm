@@ -66,7 +66,7 @@ class DataH5av2(LightningDataModule):
         filename_val: str = "validation",
         filename_test: str = "testing",
         batch_size: int = 2,
-        num_workers: int = 4,
+        num_workers: int = 11,
         n_agent: int = 64,  # if not the same as h5 dataset, use dummy agents, for scalability tests.
     ) -> None:
         super().__init__()
@@ -182,5 +182,5 @@ class DataH5av2(LightningDataModule):
             pin_memory=True,
             shuffle=False,
             drop_last=False,
-            persistent_workers=True,
+            persistent_workers=False,
         )

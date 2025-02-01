@@ -42,7 +42,8 @@ class TransformerDecoder(nn.Module):
                 query,
                 key,
                 n_agents,
-                attn_mask = None,
+                attn_mask,
+                step_current,
                 ):
 
         attn_out_1, _ = self.self_attn(query = query, 
@@ -54,7 +55,8 @@ class TransformerDecoder(nn.Module):
                                          ).unflatten(dim=1, sizes=(n_agents, self.n_time_steps)
                                          ).flatten(0, 1
                                          ).repeat(self.n_rollouts, 1, 1) 
-
+        # only future tokens for cross attention...?
+        attn_out_2 = attn_out_2[:, step_current:, ]
         #[n_rollouts * n_batch * n_agents, : , emb_dim]
         key = key.repeat(self.n_rollouts, 1, 1) 
         value = key

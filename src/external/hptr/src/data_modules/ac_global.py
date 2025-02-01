@@ -9,6 +9,7 @@ from src.external.hptr.src.utils.pose_pe import PosePE
 class AgentCentricGlobal(nn.Module):
     def __init__(
         self,
+        sampling_rate: int,
         time_step_current: int,
         data_size: DictConfig,
         dropout_p_history: float,
@@ -18,8 +19,10 @@ class AgentCentricGlobal(nn.Module):
     ) -> None:
         super().__init__()
         self.dropout_p_history = dropout_p_history  # [0, 1], turn off if set to negative
-        self.step_current = time_step_current
-        self.n_step_hist = time_step_current + 1
+        self.sampling_rate = sampling_rate
+        self.sampling_step = 10 // sampling_rate #Argov2 is sampled at 10 Hz native
+        self.step_current = (time_step_current + 1) // self.sampling_step - 1
+        self.n_step_hist = self.step_current + 1
         self.add_ohe = add_ohe
         self.pl_aggr = pl_aggr
         self.n_pl_node = data_size["map/valid"][-1]
@@ -117,14 +120,6 @@ class AgentCentricGlobal(nn.Module):
             # target type: no need to be aggregated.
                 "input/target_type": [n_scene, n_target, 3]
             # target history, other history, map
-                if pl_aggr:
-                    "input/target_valid": [n_scene, n_target], bool
-                    "input/target_attr": [n_scene, n_target, agent_attr_dim]
-                    "input/other_valid": [n_scene, n_target, n_other], bool
-                    "input/other_attr": [n_scene, n_target, n_other, agent_attr_dim]
-                    "input/map_valid": [n_scene, n_target, n_map], bool
-                    "input/map_attr": [n_scene, n_target, n_map, map_attr_dim]
-                else:
                     "input/target_valid": [n_scene, n_target, n_step_hist], bool
                     "input/target_attr": [n_scene, n_target, n_step_hist, agent_attr_dim]
                     "input/other_valid": [n_scene, n_target, n_other, n_step_hist], bool
@@ -139,38 +134,18 @@ class AgentCentricGlobal(nn.Module):
         batch["input/map_valid"] = batch["ac/map_valid"] & valid  # [n_scene, n_target, n_map, n_pl_node]
 
         # ! prepare "input/target_attr"
-        if self.pl_aggr:  # [n_scene, n_target, agent_attr_dim]
-            target_invalid = ~batch["input/target_valid"].unsqueeze(-1)  # [n_scene, n_target, n_step_hist, 1]
-            target_invalid_reduced = target_invalid.all(-2)  # [n_scene, n_target, 1]
-            batch["input/target_attr"] = torch.cat(
-                [
-                    self.pose_pe_agent(batch["ac/target_pos"], batch["ac/target_yaw_bbox"])
-                    .masked_fill(target_invalid, 0)
-                    .flatten(-2, -1),
-                    batch["ac/target_vel"].masked_fill(target_invalid, 0).flatten(-2, -1),  # n_step_hist*2
-                    batch["ac/target_spd"].masked_fill(target_invalid, 0).squeeze(-1),  # n_step_hist
-                    batch["ac/target_yaw_rate"].masked_fill(target_invalid, 0).squeeze(-1),  # n_step_hist
-                    batch["ac/target_acc"].masked_fill(target_invalid, 0).squeeze(-1),  # n_step_hist
-                    batch["ac/target_size"].masked_fill(target_invalid_reduced, 0),  # 3
-                    batch["ac/target_type"].masked_fill(target_invalid_reduced, 0),  # 3
-                    batch["input/target_valid"],  # n_step_hist
-                ],
-                dim=-1,
-            )
-            batch["input/target_valid"] = batch["input/target_valid"].any(-1)  # [n_scene, n_target]
-        else:  # [n_scene, n_target, n_step_hist, agent_attr_dim]
-            batch["input/target_attr"] = torch.cat(
-                [
-                    self.pose_pe_agent(batch["ac/target_pos"], batch["ac/target_yaw_bbox"]),
-                    batch["ac/target_vel"],  # vel xy, 2
-                    batch["ac/target_spd"],  # speed, 1
-                    batch["ac/target_yaw_rate"],  # yaw rate, 1
-                    batch["ac/target_acc"],  # acc, 1
-                    batch["ac/target_size"].unsqueeze(-2).expand(-1, -1, self.n_step_hist, -1),  # 3
-                    batch["ac/target_type"].unsqueeze(-2).expand(-1, -1, self.n_step_hist, -1),  # 3
-                ],
-                dim=-1,
-            )
+        batch["input/target_attr"] = torch.cat(
+            [
+                self.pose_pe_agent(batch["ac/target_pos"], batch["ac/target_yaw_bbox"]),
+                batch["ac/target_vel"],  # vel xy, 2
+                batch["ac/target_spd"],  # speed, 1
+                batch["ac/target_yaw_rate"],  # yaw rate, 1
+                batch["ac/target_acc"],  # acc, 1
+                batch["ac/target_size"].unsqueeze(-2).expand(-1, -1, self.n_step_hist, -1),  # 3
+                batch["ac/target_type"].unsqueeze(-2).expand(-1, -1, self.n_step_hist, -1),  # 3
+            ],
+            dim=-1,
+        )
 
         # ! prepare "input/other_attr"
         if self.pl_aggr:  # [n_scene, n_target, n_other, agent_attr_dim]

@@ -9,6 +9,7 @@ from src.external.hptr.src.utils.transform_utils import torch_rad2rot, torch_pos
 class AgentCentricPreProcessing(nn.Module):
     def __init__(
         self,
+        sampling_rate: int,
         time_step_current: int,
         data_size: DictConfig,
         n_target: int,
@@ -19,6 +20,8 @@ class AgentCentricPreProcessing(nn.Module):
         super().__init__()
         self.step_current = time_step_current
         self.n_step_hist = time_step_current + 1
+        self.sampling_rate = sampling_rate
+        self.sampling_step = 10 // sampling_rate #Argov2 is sampled at 10 Hz native
         self.n_target = n_target
         self.n_other = n_other
         self.n_map = n_map
@@ -224,6 +227,13 @@ class AgentCentricPreProcessing(nn.Module):
 
         if self.mask_invalid:
             self.zero_mask_invalid(batch)
+
+        # subsampling
+        for k in ("valid", "pos", "vel", "spd", "acc", "yaw_bbox", "yaw_rate"):
+            batch[f"ac/target_{k}"] = batch[f"ac/target_{k}"][:, :, ::self.sampling_step,]
+        for k in ("valid", "pos", "vel", "spd", "acc", "yaw_bbox", "yaw_rate"):
+            batch[f"ac/other_{k}"] = batch[f"ac/other_{k}"][:, :, :, ::self.sampling_step,]
+            
         return batch
 
     @staticmethod
