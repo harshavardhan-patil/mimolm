@@ -76,7 +76,7 @@ class MimoLM(pl.LightningModule):
                                                 "dropout_p" : None,})
 
         self.encoder = EarlyFusionEncoder(hidden_dim=256,
-                                    tf_cfg={"n_head": 4,
+                                    tf_cfg={"n_head": 2,
                                             "dropout_p": 0.1,
                                             "norm_first": True,
                                             "bias": True},
@@ -98,7 +98,7 @@ class MimoLM(pl.LightningModule):
                                 dropout_rate = 0.0,
                                 n_rollouts = self.n_rollouts,
                                 n_heads = 2,
-                                n_layers = 1,)
+                                n_layers = 2,)
         
         self.logsoftmax = torch.nn.LogSoftmax(dim=-1)
         self.criterion = torch.nn.NLLLoss()
@@ -133,10 +133,8 @@ class MimoLM(pl.LightningModule):
                                 self.decoder.verlet_wrapper, 
                                 self.decoder.n_verlet_steps, 
                                 self.decoder.n_time_steps)
-            print(actuals.shape)
             
         motion_tokens = torch.cat((batch["ac/target_pos"], batch["gt/pos"][:, :, ::self.sampling_step,]), dim = -2)
-        print(motion_tokens.shape)
         target_types = batch["ac/target_type"]
         input_dict = {
         k.split("input/")[-1]: v for k, v in batch.items() if "input/" in k
@@ -153,7 +151,6 @@ class MimoLM(pl.LightningModule):
                     target_emb, target_valid, other_emb, other_valid, map_emb, map_valid, input_dict["target_type"], valid
                 )
         pred = self.decoder(motion_tokens, target_types, fused_emb, fused_emb_invalid)
-        print(pred.shape)
         pred = F.interpolate(pred.permute(0, 2, 1), size=60, mode="linear", align_corners=True).permute(0, 2, 1)
         loss = self.criterion(
             self.logsoftmax(pred.flatten(0, 1)), 
@@ -408,8 +405,11 @@ class MotionDecoder(nn.Module):
         
         #self attending motion tokens + cross attending to scene emebeddings
         query = motion_embeddings
-        attn_mask = get_attention_mask(self.n_time_steps, query.shape[1]).type_as(self.attn_type) # type_as casting simply to move to right device with Lightning
+         # type_as casting simply to move to right device with Lightning
         for decoder_block in self.decoder_layers:
+            if query.shape[0] != n_batch:
+                query = query.unflatten(dim=0, sizes=(2, 8)).flatten(1, 2)
+            attn_mask = get_attention_mask(self.n_time_steps, query.shape[1]).type_as(self.attn_type)
             query = decoder_block(query = query, 
                                   key = fused_emb, 
                                   attn_mask = attn_mask,
