@@ -313,7 +313,7 @@ class MotionDecoder(nn.Module):
             emb_dim: int = 256,
             sampling_rate: int = 5,
             n_time_steps: int = 110,
-            n_target: int = 6, #should be same as AgentCentricProcessing
+            n_target: int = 8, #should be same as AgentCentricProcessing
             time_step_end: int = 49,
             dropout_rate: int = 0.0,
             n_rollouts: int = 64,
@@ -408,7 +408,7 @@ class MotionDecoder(nn.Module):
          # type_as casting simply to move to right device with Lightning
         for decoder_block in self.decoder_layers:
             if query.shape[0] != n_batch:
-                query = query.unflatten(dim=0, sizes=(2, 8)).flatten(1, 2)
+                query = query.unflatten(dim=0, sizes=(n_batch, n_agents)).flatten(1, 2)
             attn_mask = get_attention_mask(self.n_time_steps, query.shape[1]).type_as(self.attn_type)
             query = decoder_block(query = query, 
                                   key = fused_emb, 
