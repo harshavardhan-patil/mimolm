@@ -39,21 +39,24 @@ class MimoLM(pl.LightningModule):
         data_size,
         n_rollouts = 1,
         sampling_rate = 5,
+        n_targets = 12,
         **kwargs,
     ) -> None:
         super().__init__()
         self.n_rollouts = n_rollouts
+        self.n_targets = n_targets
         self.sampling_rate = sampling_rate
         self.sampling_step = 10 // sampling_rate
         self.inference_steps = 60 // self.sampling_step # AV2 has 60 future timesteps
+        self.inference_start = 50 // self.sampling_step
         self.preprocessor = nn.Sequential(OrderedDict([
-            ('pre_1', AgentCentricPreProcessing(sampling_rate = 5,
+            ('pre_1', AgentCentricPreProcessing(sampling_rate = self.sampling_rate,
                                         time_step_current=49, 
-                                        n_target=8,
+                                        n_target=self.n_targets,
                                         n_other=48,
                                         n_map=512,
                                         mask_invalid=False)),
-            ('pre_2', AgentCentricGlobal(sampling_rate = 5,
+            ('pre_2', AgentCentricGlobal(sampling_rate = self.sampling_rate,
                                 data_size=data_size,
                                time_step_current=49,
                                 dropout_p_history=0.15, 
@@ -87,13 +90,13 @@ class MimoLM(pl.LightningModule):
                                     n_latent_query=192,
                                     n_encoder_layers=2)  
 
-        self.decoder = MotionDecoder(max_delta = 18.0, #meters
+        self.decoder = MotionDecoder(max_delta = 8.0, #meters
                                 n_quantization_bins = 128,
                                 n_verlet_steps = 13,
                                 emb_dim = 256,
                                 sampling_rate = self.sampling_rate,
                                 n_time_steps = 110,
-                                n_target = 8, #should be same as AgentCentricProcessing
+                                n_target = self.n_targets, #should be same as AgentCentricProcessing
                                 time_step_end = 49,
                                 dropout_rate = 0.0,
                                 n_rollouts = self.n_rollouts,
@@ -128,7 +131,7 @@ class MimoLM(pl.LightningModule):
                     target_emb, target_valid, other_emb, other_valid, map_emb, map_valid, input_dict["target_type"], valid
                 )
         pred, _ = self.decoder(motion_tokens, target_types, fused_emb, fused_emb_invalid)
-        pred = pred[:, 25:, :]
+        pred = pred[:, self.inference_start:, :]
         pred = F.interpolate(pred.permute(0, 2, 1), size=60, mode="linear", align_corners=True).permute(0, 2, 1)
         loss = self.criterion(
             self.logsoftmax(pred.flatten(0, 1)), 
@@ -138,7 +141,7 @@ class MimoLM(pl.LightningModule):
         return loss
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam([
+        optimizer = torch.optim.AdamW([
             {'params': self.input_projections.parameters(),
             'params': self.encoder.parameters(),
             'params': self.decoder.parameters()}], lr=1e-3)
