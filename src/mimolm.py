@@ -39,7 +39,7 @@ class MimoLM(pl.LightningModule):
         data_size,
         n_rollouts = 1,
         sampling_rate = 5,
-        n_targets = 12,
+        n_targets = 8,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -179,7 +179,7 @@ class MimoLM(pl.LightningModule):
             pred = F.softmax(pred[:, -1], dim=-1).argmax(dim=1)
             pred = self.decoder.vocabulary[pred][:, 1:].unflatten(dim=0, sizes=(n_batch, n_agents))
             pred = self.decoder.verlet_wrapper[pred]
-            pred = last_token + pred
+            pred = torch.clamp(last_token + pred, min=0, max=127)
             pred = self.decoder.pos_bins[pred.long()]
             pred = last_pos + pred
             batch["ac/target_pos"] = torch.cat((batch["ac/target_pos"], pred.unsqueeze(2)), dim = -2)
