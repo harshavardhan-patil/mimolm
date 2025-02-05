@@ -43,12 +43,14 @@ class MimoLM(pl.LightningModule):
         **kwargs,
     ) -> None:
         super().__init__()
+        self.learning_rate = 1e-3
         self.n_rollouts = n_rollouts
         self.n_targets = n_targets
         self.sampling_rate = sampling_rate
         self.sampling_step = 10 // sampling_rate
         self.inference_steps = 60 // self.sampling_step # AV2 has 60 future timesteps
         self.inference_start = 50 // self.sampling_step
+
         self.preprocessor = nn.Sequential(OrderedDict([
             ('pre_1', AgentCentricPreProcessing(sampling_rate = self.sampling_rate,
                                         time_step_current=49, 
@@ -144,7 +146,7 @@ class MimoLM(pl.LightningModule):
         optimizer = torch.optim.AdamW([
             {'params': self.input_projections.parameters(),
             'params': self.encoder.parameters(),
-            'params': self.decoder.parameters()}], lr=1e-3)
+            'params': self.decoder.parameters()}], lr=self.learning_rate)
         return optimizer
     
     def validation_step(self, batch, **kwargs):
