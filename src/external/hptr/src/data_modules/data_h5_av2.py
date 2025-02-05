@@ -65,7 +65,7 @@ class DataH5av2(LightningDataModule):
         filename_train: str = "train",
         filename_val: str = "val",
         filename_test: str = "testing",
-        batch_size: int = 24,
+        batch_size: int = 48,
         num_workers: int = 11,
         n_agent: int = 64,  # if not the same as h5 dataset, use dummy agents, for scalability tests.
     ) -> None:

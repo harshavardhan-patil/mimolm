@@ -40,16 +40,17 @@ class MimoLM(pl.LightningModule):
         n_rollouts = 1,
         sampling_rate = 5,
         n_targets = 8,
+        learning_rate = 1e-3,
         **kwargs,
     ) -> None:
         super().__init__()
-        self.learning_rate = 1e-3
         self.n_rollouts = n_rollouts
         self.n_targets = n_targets
         self.sampling_rate = sampling_rate
         self.sampling_step = 10 // sampling_rate
         self.inference_steps = 60 // self.sampling_step # AV2 has 60 future timesteps
         self.inference_start = 50 // self.sampling_step
+        self.learning_rate = learning_rate
 
         self.preprocessor = nn.Sequential(OrderedDict([
             ('pre_1', AgentCentricPreProcessing(sampling_rate = self.sampling_rate,
@@ -72,7 +73,7 @@ class MimoLM(pl.LightningModule):
                                     map_attr_dim=self.preprocessor.pre_2.model_kwargs["map_attr_dim"],
                                     n_step_hist=self.preprocessor.pre_2.model_kwargs["n_step_hist"],
                                     n_pl_node=self.preprocessor.pre_2.model_kwargs["n_pl_node"],
-                                    hidden_dim=256,
+                                    hidden_dim=128,
                                     add_learned_pe=True,
                                     n_layer_mlp=3,
                                     mlp_cfg={"end_layer_activation" : True,
@@ -80,7 +81,7 @@ class MimoLM(pl.LightningModule):
                                                 "use_batchnorm" : False,
                                                 "dropout_p" : None,})
 
-        self.encoder = EarlyFusionEncoder(hidden_dim=256,
+        self.encoder = EarlyFusionEncoder(hidden_dim=128,
                                     tf_cfg={"n_head": 2,
                                             "dropout_p": 0.1,
                                             "norm_first": True,
@@ -89,13 +90,13 @@ class MimoLM(pl.LightningModule):
                                                 "mode_emb": "none", # linear, mlp, add, none
                                                 "mode_init": "xavier", # uniform, xavier
                                                 "scale": 5.0},
-                                    n_latent_query=192,
+                                    n_latent_query=128,
                                     n_encoder_layers=2)  
 
         self.decoder = MotionDecoder(max_delta = 8.0, #meters
                                 n_quantization_bins = 128,
                                 n_verlet_steps = 13,
-                                emb_dim = 256,
+                                emb_dim = 128,
                                 sampling_rate = self.sampling_rate,
                                 n_time_steps = 110,
                                 n_target = self.n_targets, #should be same as AgentCentricProcessing
@@ -339,9 +340,9 @@ class MotionDecoder(nn.Module):
             max_delta: float, #meters
             sampling_rate: int,
             n_target: int,
+            emb_dim: int,
             n_quantization_bins: int = 128,
             n_verlet_steps: int = 13,
-            emb_dim: int = 256,
             n_time_steps: int = 110,
             time_step_end: int = 49,
             dropout_rate: int = 0.0,
@@ -389,9 +390,7 @@ class MotionDecoder(nn.Module):
         )
 
         self.fully_connected_layers = nn.Sequential(
-            nn.Linear(self.emb_dim, 1024),
-            nn.GELU(),
-            nn.Linear(1024, 512),
+            nn.Linear(self.emb_dim, 512),
             nn.GELU(),
             nn.Linear(512, 256),
             nn.GELU(),
