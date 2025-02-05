@@ -63,7 +63,7 @@ class DataH5av2(LightningDataModule):
         self,
         data_dir: str,
         filename_train: str = "train",
-        filename_val: str = "validation",
+        filename_val: str = "val",
         filename_test: str = "testing",
         batch_size: int = 2,
         num_workers: int = 11,
@@ -158,7 +158,7 @@ class DataH5av2(LightningDataModule):
     def setup(self, stage: Optional[str] = None) -> None:
         if stage == "fit" or stage is None:
             self.train_dataset = DatasetTrain(self.path_train_h5, self.tensor_size_train)
-            #self.val_dataset = DatasetVal(self.path_val_h5, self.tensor_size_val)
+            self.val_dataset = DatasetVal(self.path_val_h5, self.tensor_size_val)
         elif stage == "validate":
             self.val_dataset = DatasetVal(self.path_val_h5, self.tensor_size_val)
         elif stage == "test":

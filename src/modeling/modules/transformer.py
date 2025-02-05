@@ -43,7 +43,7 @@ class TransformerDecoder(nn.Module):
                 key,
                 n_agents,
                 attn_mask,
-                step_current,
+                n_steps,
                 ):
 
         attn_out_1, _ = self.self_attn(query = query, 
@@ -52,7 +52,7 @@ class TransformerDecoder(nn.Module):
                                         attn_mask = attn_mask)
         #[n_rollouts * n_batch * n_agents, n_time_steps, emb_dim]
         attn_out_2 = self.layer_norm_1(query + attn_out_1
-                                         ).unflatten(dim=1, sizes=(n_agents, self.n_time_steps)
+                                         ).unflatten(dim=1, sizes=(n_agents, n_steps)
                                          ).flatten(0, 1
                                          ).repeat(self.n_rollouts, 1, 1) 
         # only future tokens for cross attention...need to adjust for multiple layers

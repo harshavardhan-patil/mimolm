@@ -45,9 +45,9 @@ class MimoLM(pl.LightningModule):
         self.n_rollouts = n_rollouts
         self.samping_rate = sampling_rate
         self.sampling_step = 10 // sampling_rate
+        self.inference_steps = 60 // self.sampling_step # AV2 has 60 future timesteps
         self.preprocessor = nn.Sequential(OrderedDict([
             ('pre_1', AgentCentricPreProcessing(sampling_rate = 5,
-                                        data_size=data_size, 
                                         time_step_current=49, 
                                         n_target=8,
                                         n_other=48,
@@ -103,36 +103,13 @@ class MimoLM(pl.LightningModule):
         self.logsoftmax = torch.nn.LogSoftmax(dim=-1)
         self.criterion = torch.nn.NLLLoss()
 
-
-    def on_before_batch_transfer(self, batch, idx):
-        batch_tensor = TensorDict({
-                    "agent/valid": batch["agent/valid"],
-                    "agent/pos": batch["agent/pos"],
-                    "agent/vel": batch["agent/vel"],
-                    "agent/spd": batch["agent/spd"],
-                    "agent/acc": batch["agent/acc"],
-                    "agent/yaw_bbox": batch["agent/yaw_bbox"],
-                    "agent/yaw_rate": batch["agent/yaw_rate"],
-                # agent attributes
-                    "agent/type": batch["agent/type"],
-                    "agent/role": batch["agent/role"],
-                    "agent/size": batch["agent/size"],
-                # map polylines
-                    "map/valid": batch["map/valid"],
-                    "map/type": batch["map/type"],
-                    "map/pos": batch["map/pos"],
-                    "map/dir": batch["map/dir"]
-        })
-        return batch_tensor
-
     def training_step(self, batch, **kwargs):
         with torch.no_grad():
             batch = self.preprocessor(batch)
-            actuals = tokenize_motion(batch["gt/pos"],
+            actuals, _ = tokenize_motion(batch["gt/pos"],
                                 self.decoder.pos_bins, 
                                 self.decoder.verlet_wrapper, 
-                                self.decoder.n_verlet_steps, 
-                                self.decoder.n_time_steps)
+                                self.decoder.n_verlet_steps)
             
         motion_tokens = torch.cat((batch["ac/target_pos"], batch["gt/pos"][:, :, ::self.sampling_step,]), dim = -2)
         target_types = batch["ac/target_type"]
@@ -150,7 +127,8 @@ class MimoLM(pl.LightningModule):
         fused_emb, fused_emb_invalid = self.encoder(
                     target_emb, target_valid, other_emb, other_valid, map_emb, map_valid, input_dict["target_type"], valid
                 )
-        pred = self.decoder(motion_tokens, target_types, fused_emb, fused_emb_invalid)
+        pred, _ = self.decoder(motion_tokens, target_types, fused_emb, fused_emb_invalid)
+        pred = pred[:, 25:, :]
         pred = F.interpolate(pred.permute(0, 2, 1), size=60, mode="linear", align_corners=True).permute(0, 2, 1)
         loss = self.criterion(
             self.logsoftmax(pred.flatten(0, 1)), 
@@ -165,6 +143,52 @@ class MimoLM(pl.LightningModule):
             'params': self.encoder.parameters(),
             'params': self.decoder.parameters()}], lr=1e-3)
         return optimizer
+    
+    def validation_step(self, batch, **kwargs):
+        batch = self.preprocessor(batch)
+        actuals, _ = tokenize_motion(batch["gt/pos"],
+            self.decoder.pos_bins, 
+            self.decoder.verlet_wrapper, 
+            self.decoder.n_verlet_steps)
+        n_batch, n_agents = batch["ac/target_pos"].shape[0], batch["ac/target_pos"].shape[1]
+        
+        input_dict = {
+        k.split("input/")[-1]: v for k, v in batch.items() if "input/" in k
+        }
+        valid = input_dict["target_valid"].any(-1)
+        target_emb, target_valid, other_emb, other_valid, map_emb, map_valid = self.input_projections(target_valid = input_dict["target_valid"], 
+                target_attr = input_dict["target_attr"],
+                other_valid = input_dict["other_valid"],
+                other_attr = input_dict["other_attr"],
+                map_valid = input_dict["map_valid"],
+                map_attr = input_dict["map_attr"],)
+        
+        fused_emb, fused_emb_invalid = self.encoder(
+                    target_emb, target_valid, other_emb, other_valid, map_emb, map_valid, input_dict["target_type"], valid
+                )
+        preds = []
+        for _ in range(self.inference_steps):
+            last_pos = batch["ac/target_pos"][:, :, -1]
+            motion_tokens = batch["ac/target_pos"]
+            target_types = batch["ac/target_type"]
+            pred, last_token = self.decoder(motion_tokens, target_types, fused_emb, fused_emb_invalid)
+            preds.append(pred[:, -1].unsqueeze(1))
+            pred = F.softmax(pred[:, -1], dim=-1).argmax(dim=1)
+            pred = self.decoder.vocabulary[pred][:, 1:].unflatten(dim=0, sizes=(n_batch, n_agents))
+            pred = self.decoder.verlet_wrapper[pred]
+            pred = last_token + pred
+            pred = self.decoder.pos_bins[pred.long()]
+            pred = last_pos + pred
+            batch["ac/target_pos"] = torch.cat((batch["ac/target_pos"], pred.unsqueeze(2)), dim = -2)
+
+        preds = torch.cat(preds, dim=1)
+        preds = F.interpolate(preds.permute(0, 2, 1), size=60, mode="linear", align_corners=True).permute(0, 2, 1)
+        loss = self.criterion(
+            self.logsoftmax(preds.flatten(0, 1)), 
+            actuals.flatten(0, 1).flatten(0, 1).repeat(self.n_rollouts))
+
+        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True) 
+        return loss
 
 class InputProjections(nn.Module):
     def __init__(
@@ -303,11 +327,11 @@ class EarlyFusionEncoder(nn.Module):
 
         return emb, emb_invalid
 
-#to-do: reducing the sampling rate of the predictions
+
 class MotionDecoder(nn.Module):
     def __init__(
             self,
-            max_delta: float = 4.0, #meters
+            max_delta: float, #meters
             n_quantization_bins: int = 128,
             n_verlet_steps: int = 13,
             emb_dim: int = 256,
@@ -344,7 +368,7 @@ class MotionDecoder(nn.Module):
 
         self.vocab_size = len(self.vocabulary)
         time_indices = torch.arange(0, self.n_time_steps)
-        self.register_buffer("time_indices", time_indices)
+        self.register_buffer("time_indices_type", time_indices)
 
         self.val_emb_layer = nn.Embedding(self.vocab_size, self.emb_dim)
         self.step_emb_layer = nn.Embedding(self.n_time_steps, self.emb_dim)
@@ -379,24 +403,25 @@ class MotionDecoder(nn.Module):
 
         n_agents = motion_tokens.shape[1]
         n_batch = motion_tokens.shape[0]
+        n_steps = motion_tokens.shape[2]
+        time_indices = torch.arange(0, n_steps).type_as(self.time_indices_type)
 
         # quantized, discretized, verlet-wrapped motion tokens
-        motion_tokens = tokenize_motion(motion_tokens, # [n_batch, n_agents, n_time_steps]
+        motion_tokens, last_token = tokenize_motion(motion_tokens, # [n_batch, n_agents, n_time_steps, 1]
                                         self.pos_bins, 
                                         self.verlet_wrapper, 
-                                        self.n_verlet_steps, 
-                                        self.n_time_steps)
+                                        self.n_verlet_steps)
         
         # we compute a learned value embedding and two learned positional embeddings (representing the timestep and agent identity) for each discrete motion token, which are combined via an element-wise sum prior to being input to the transformer decoder.
         val_embeddings = self.val_emb_layer(motion_tokens)
-        step_embeddings = self.step_emb_layer(self.time_indices
+        step_embeddings = self.step_emb_layer(time_indices
                                               ).unsqueeze(0
                                               ).repeat(motion_tokens.shape[1], 1, 1
                                               ).unsqueeze(0
                                               ).repeat(motion_tokens.shape[0], 1, 1, 1)
         type_embeddings = self.type_emb_layer(target_types.int().argmax(dim=-1)
                                               ).unsqueeze(2
-                                              ).repeat(1, 1, self.n_time_steps, 1)
+                                              ).repeat(1, 1, n_steps, 1)
         # [n_batch, n_agents * n_time_steps, emb_dim]
         motion_embeddings = (val_embeddings + 
                              step_embeddings + 
@@ -409,12 +434,12 @@ class MotionDecoder(nn.Module):
         for decoder_block in self.decoder_layers:
             if query.shape[0] != n_batch:
                 query = query.unflatten(dim=0, sizes=(n_batch, n_agents)).flatten(1, 2)
-            attn_mask = get_attention_mask(self.n_time_steps, query.shape[1]).type_as(self.attn_type)
+            attn_mask = get_attention_mask(n_steps, query.shape[1]).type_as(self.attn_type)
             query = decoder_block(query = query, 
                                   key = fused_emb, 
                                   attn_mask = attn_mask,
                                   n_agents = n_agents,
-                                  step_current = self.step_current)
+                                  n_steps = n_steps)
             
         out = self.fully_connected_layers(query)
-        return out
+        return out, last_token

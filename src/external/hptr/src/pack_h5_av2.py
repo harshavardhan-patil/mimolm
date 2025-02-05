@@ -232,11 +232,11 @@ def main():
         pack_all = True  # ["agent/valid"]
         pack_history = False  # ["history/agent/valid"]
         n_step = N_STEP
-    elif "validation" in args.dataset:
+    elif "val" in args.dataset:
         pack_all = True
         pack_history = True
         n_step = N_STEP
-    elif "testing" in args.dataset:
+    elif "test" in args.dataset:
         pack_all = False
         pack_history = True
         n_step = STEP_CURRENT + 1
@@ -303,7 +303,7 @@ def main():
                     dim_ped_lanes=DIM_PED_LANES,
                     dest_no_pred=args.dest_no_pred,
                 )
-            elif "validation" in args.dataset:
+            elif "val" in args.dataset:
                 mask_sim, mask_no_sim = pack_utils.filter_episode_agents(
                     episode=episode,
                     episode_reduced=episode_reduced,
@@ -329,7 +329,7 @@ def main():
                 pack_utils.repack_episode_agents_no_sim(
                     episode, episode_reduced, mask_no_sim, N_AGENT_NO_SIM, "history/"
                 )
-            elif "testing" in args.dataset:
+            elif "test" in args.dataset:
                 mask_sim, mask_no_sim = pack_utils.filter_episode_agents(
                     episode=episode,
                     episode_reduced=episode_reduced,

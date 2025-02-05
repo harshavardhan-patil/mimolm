@@ -11,7 +11,6 @@ class AgentCentricPreProcessing(nn.Module):
         self,
         sampling_rate: int,
         time_step_current: int,
-        data_size: DictConfig,
         n_target: int,
         n_other: int,
         n_map: int,

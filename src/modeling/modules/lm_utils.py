@@ -2,7 +2,7 @@ import itertools
 import torch
 
 def create_vocabulary(max_delta, n_quantization_bins, n_verlet_steps):
-    bins = torch.stack((torch.linspace(-max_delta, max_delta, steps=n_quantization_bins), torch.linspace(-max_delta, max_delta, steps=n_quantization_bins)))
+    bins = torch.linspace(-max_delta, max_delta, steps=n_quantization_bins)
     verlet_wrapper = torch.linspace(-n_verlet_steps // 2 + 1, n_verlet_steps // 2, steps=n_verlet_steps)
 
     cartesian_product = list(itertools.product(torch.arange(n_verlet_steps), torch.arange(n_verlet_steps)))
@@ -15,12 +15,14 @@ def create_vocabulary(max_delta, n_quantization_bins, n_verlet_steps):
     return torch.tensor(vocabulary), bins, verlet_wrapper
 
 
-def tokenize_motion(motion_tokens, vocabulary, verlet_wrapper, n_verlet_steps, n_time_steps):
+def tokenize_motion(motion_tokens, pos_bins, verlet_wrapper, n_verlet_steps):
     # delta_x and delta_y
     motion_tokens = torch.diff(motion_tokens, dim=2, prepend = motion_tokens[:, :, :1, :])
     # MotionLM uses greedy search, using bucketize here for simplicity
-    x_tokens = torch.bucketize(motion_tokens[:, :, :, 0].contiguous(), vocabulary[0],)
-    y_tokens = torch.bucketize(motion_tokens[:, :, :, 1].contiguous(), vocabulary[1],)
+    x_tokens = torch.bucketize(motion_tokens[:, :, :, 0].contiguous(), pos_bins,)
+    y_tokens = torch.bucketize(motion_tokens[:, :, :, 1].contiguous(), pos_bins,)
+    x_last = x_tokens[:, :, -1].unsqueeze(-1)
+    y_last = y_tokens[:, :, -1].unsqueeze(-1)
     x_tokens_diff = torch.diff(x_tokens, dim=2, prepend = x_tokens[:, :, :1])
     y_tokens_diff = torch.diff(y_tokens, dim=2, prepend = y_tokens[:, :, :1])
     # Verlet Wrapper (see paper): The idea is that velocity of cars changes smoothly, so we can use a smaller vocabulary to represent the relative motion between the last two time steps.
@@ -29,8 +31,7 @@ def tokenize_motion(motion_tokens, vocabulary, verlet_wrapper, n_verlet_steps, n
     x_tokens = torch.clamp(torch.bucketize(x_tokens_diff, verlet_wrapper,), min = 0, max = n_verlet_steps - 1)
     y_tokens = torch.clamp(torch.bucketize(y_tokens_diff, verlet_wrapper,), min = 0, max = n_verlet_steps - 1)
     # collapse the per-coordinate actions to a single integer indexing into their Cartesian product
-    return x_tokens * n_verlet_steps + y_tokens
-
+    return x_tokens * n_verlet_steps + y_tokens, torch.cat((x_last, y_last), dim=-1)
 
 def get_attention_mask(n_time_steps, size):
     i = torch.arange(size)[:, None] % n_time_steps
