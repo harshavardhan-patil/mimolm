@@ -43,7 +43,7 @@ class MimoLM(pl.LightningModule):
     ) -> None:
         super().__init__()
         self.n_rollouts = n_rollouts
-        self.samping_rate = sampling_rate
+        self.sampling_rate = sampling_rate
         self.sampling_step = 10 // sampling_rate
         self.inference_steps = 60 // self.sampling_step # AV2 has 60 future timesteps
         self.preprocessor = nn.Sequential(OrderedDict([
@@ -87,11 +87,11 @@ class MimoLM(pl.LightningModule):
                                     n_latent_query=192,
                                     n_encoder_layers=2)  
 
-        self.decoder = MotionDecoder(max_delta = 8.0, #meters
+        self.decoder = MotionDecoder(max_delta = 18.0, #meters
                                 n_quantization_bins = 128,
                                 n_verlet_steps = 13,
                                 emb_dim = 256,
-                                sampling_rate = 5,
+                                sampling_rate = self.sampling_rate,
                                 n_time_steps = 110,
                                 n_target = 8, #should be same as AgentCentricProcessing
                                 time_step_end = 49,
@@ -332,12 +332,12 @@ class MotionDecoder(nn.Module):
     def __init__(
             self,
             max_delta: float, #meters
+            sampling_rate: int,
+            n_target: int,
             n_quantization_bins: int = 128,
             n_verlet_steps: int = 13,
             emb_dim: int = 256,
-            sampling_rate: int = 5,
             n_time_steps: int = 110,
-            n_target: int = 8, #should be same as AgentCentricProcessing
             time_step_end: int = 49,
             dropout_rate: int = 0.0,
             n_rollouts: int = 64,
