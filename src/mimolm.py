@@ -40,7 +40,7 @@ class MimoLM(pl.LightningModule):
         n_rollouts = 1,
         sampling_rate = 5,
         n_targets = 8,
-        learning_rate = 0.0003,
+        learning_rate = 3.e-06,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -147,18 +147,26 @@ class MimoLM(pl.LightningModule):
         optimizer = torch.optim.AdamW([
             {'params': self.input_projections.parameters(),
             'params': self.encoder.parameters(),
-            'params': self.decoder.parameters()}], lr=self.learning_rate)
-        return {
-        "optimizer": optimizer,
-        "lr_scheduler": {
-            "scheduler": torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2, threshold=0.0001, threshold_mode='rel', cooldown=0, min_lr=0, eps=1e-10,),
+            'params': self.decoder.parameters()}]
+            , lr=self.learning_rate
+            , weight_decay=0.1)
+        lr_scheduler = {
+            "scheduler": torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer
+                                                                    , mode='min'
+                                                                    , factor=0.1
+                                                                    , patience=4
+                                                                    , threshold=0.0001
+                                                                    , threshold_mode='rel'
+                                                                    , cooldown=0
+                                                                    , min_lr=0
+                                                                    , eps=1e-10,),
             "interval": "epoch",
             # How many epochs/steps should pass between calls to `scheduler.step()`. 1 corresponds to updating the learning rate after every epoch/step.
             "frequency": 1,
             # Metric to to monitor for schedulers like `ReduceLROnPlateau`
             "monitor": "val_loss",
-        },
-    }
+        }
+        return [optimizer], [lr_scheduler]
     
     def validation_step(self, batch, **kwargs):
         batch = self.preprocessor(batch)
