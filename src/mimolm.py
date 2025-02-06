@@ -40,7 +40,7 @@ class MimoLM(pl.LightningModule):
         n_rollouts = 1,
         sampling_rate = 5,
         n_targets = 8,
-        learning_rate = 0.0007,
+        learning_rate = 0.0003,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -148,7 +148,17 @@ class MimoLM(pl.LightningModule):
             {'params': self.input_projections.parameters(),
             'params': self.encoder.parameters(),
             'params': self.decoder.parameters()}], lr=self.learning_rate)
-        return optimizer
+        return {
+        "optimizer": optimizer,
+        "lr_scheduler": {
+            "scheduler": torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=3, threshold=0.0001, threshold_mode='rel', cooldown=0, min_lr=0, eps=1e-10,),
+            "interval": "epoch",
+            # How many epochs/steps should pass between calls to `scheduler.step()`. 1 corresponds to updating the learning rate after every epoch/step.
+            "frequency": 1,
+            # Metric to to monitor for schedulers like `ReduceLROnPlateau`
+            "monitor": "val_loss",
+        },
+    }
     
     def validation_step(self, batch, **kwargs):
         batch = self.preprocessor(batch)
@@ -194,6 +204,7 @@ class MimoLM(pl.LightningModule):
             actuals.flatten(0, 1).flatten(0, 1).repeat(self.n_rollouts))
 
         self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True) 
+        self.log("lr", self.learning_rate, on_step=False, on_epoch=True, prog_bar=True, logger=True) 
         return loss
 
 class InputProjections(nn.Module):
