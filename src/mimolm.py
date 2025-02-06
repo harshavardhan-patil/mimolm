@@ -413,6 +413,7 @@ class MotionDecoder(nn.Module):
             nn.Linear(self.emb_dim, 512),
             nn.GELU(),
             nn.Linear(512, 256),
+            nn.Dropout(p=self.dropout_rate),
             nn.GELU(),
             nn.Linear(256, self.vocab_size)
         )
