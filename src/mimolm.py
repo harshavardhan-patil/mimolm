@@ -40,7 +40,7 @@ class MimoLM(pl.LightningModule):
         n_rollouts = 1,
         sampling_rate = 5,
         n_targets = 8,
-        learning_rate = 1e-3,
+        learning_rate = 0.0007,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -101,7 +101,7 @@ class MimoLM(pl.LightningModule):
                                 n_time_steps = 110,
                                 n_target = self.n_targets, #should be same as AgentCentricProcessing
                                 time_step_end = 49,
-                                dropout_rate = 0.0,
+                                dropout_rate = 0.1,
                                 n_rollouts = self.n_rollouts,
                                 n_heads = 2,
                                 n_layers = 2,)
@@ -341,11 +341,11 @@ class MotionDecoder(nn.Module):
             sampling_rate: int,
             n_target: int,
             emb_dim: int,
+            dropout_rate: int,
             n_quantization_bins: int = 128,
             n_verlet_steps: int = 13,
             n_time_steps: int = 110,
             time_step_end: int = 49,
-            dropout_rate: int = 0.0,
             n_rollouts: int = 64,
             n_heads: int = 2,
             n_layers: int = 1,

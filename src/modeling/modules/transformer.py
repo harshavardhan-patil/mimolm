@@ -67,7 +67,7 @@ class TransformerDecoder(nn.Module):
         attn_out_4 = self.layer_norm_2(attn_out_2 + attn_out_3)
         #feed-forward
         ffn_out_1 = F.gelu(self.ffn_1(attn_out_4))
-        out = self.layer_norm_3(ffn_out_1 + attn_out_4)
+        out = self.layer_norm_3(self.dropout(ffn_out_1 + attn_out_4))
 
         return out
 
