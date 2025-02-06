@@ -151,7 +151,7 @@ class MimoLM(pl.LightningModule):
         return {
         "optimizer": optimizer,
         "lr_scheduler": {
-            "scheduler": torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.1, patience=3, threshold=0.0001, threshold_mode='rel', cooldown=0, min_lr=0, eps=1e-10,),
+            "scheduler": torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=2, threshold=0.0001, threshold_mode='rel', cooldown=0, min_lr=0, eps=1e-10,),
             "interval": "epoch",
             # How many epochs/steps should pass between calls to `scheduler.step()`. 1 corresponds to updating the learning rate after every epoch/step.
             "frequency": 1,
@@ -204,7 +204,8 @@ class MimoLM(pl.LightningModule):
             actuals.flatten(0, 1).flatten(0, 1).repeat(self.n_rollouts))
 
         self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True) 
-        self.log("lr", self.learning_rate, on_step=False, on_epoch=True, prog_bar=True, logger=True) 
+        curr_lr = self.trainer.optimizers[0].param_groups[0]['lr']
+        self.log("curr_lr", curr_lr, on_step=False, on_epoch=True, prog_bar=True, logger=True) 
         return loss
 
 class InputProjections(nn.Module):
