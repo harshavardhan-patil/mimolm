@@ -117,12 +117,6 @@ class MimoLM(pl.LightningModule):
         self.logsoftmax = torch.nn.LogSoftmax(dim=-1)
         self.criterion = torch.nn.NLLLoss()
 
-        self.validation_output = {
-                    'BrierMinFDE' : np.zeros(shape=[24988])
-                    ,'MinFDE' : np.zeros(shape=[24988])
-                    ,'MinADE' : np.zeros(shape=[24988])
-        }
-
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW([
             {'params': self.input_projections.parameters(),
@@ -283,9 +277,10 @@ class MimoLM(pl.LightningModule):
         forecasted_trajs = trajs.permute(1, 0, 2, 3).cpu()
         gt_trajs = gt_pos.squeeze(0).cpu()
         mode_probs = mode_probs.cpu()
-        self.validation_output['BrierMinFDE'][batch['episode_idx'][0]] = min(compute_world_brier_fde(forecasted_trajs, gt_trajs, mode_probs)[:6])
-        self.validation_output['MinADE'][batch['episode_idx'][0]] = min(compute_world_ade(forecasted_trajs, gt_trajs))
-        self.validation_output['MinFDE'][batch['episode_idx'][0]] = min(compute_world_fde(forecasted_trajs, gt_trajs))
+        
+        self.log("BrierMinFDE", min(compute_world_brier_fde(forecasted_trajs, gt_trajs, mode_probs)[:6]), on_step=True, on_epoch=True, prog_bar=True, logger=True) 
+        self.log("MinADE", min(compute_world_ade(forecasted_trajs, gt_trajs)), on_step=True, on_epoch=True, prog_bar=True, logger=True) 
+        self.log("MinFDE", min(compute_world_fde(forecasted_trajs, gt_trajs)), on_step=True, on_epoch=True, prog_bar=True, logger=True) 
         return -1
      
 
