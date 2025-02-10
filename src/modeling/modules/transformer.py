@@ -53,12 +53,9 @@ class TransformerDecoder(nn.Module):
         #[n_rollouts * n_batch * n_agents, n_time_steps, emb_dim]
         attn_out_2 = self.layer_norm_1(query + attn_out_1
                                          ).unflatten(dim=1, sizes=(n_agents, n_steps)
-                                         ).flatten(0, 1
-                                         ).repeat(self.n_rollouts, 1, 1) 
-        # only future tokens for cross attention...need to adjust for multiple layers
-        #attn_out_2 = attn_out_2[:, step_current:, ]
+                                         ).flatten(0, 1) 
+        
         #[n_rollouts * n_batch * n_agents, : , emb_dim]
-        key = key.repeat(self.n_rollouts, 1, 1) 
         value = key
         # cross attend each motion token to corresponding scene embeddings,
         attn_out_3, _ = self.cross_attn(query = attn_out_2, 

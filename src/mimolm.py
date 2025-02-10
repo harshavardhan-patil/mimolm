@@ -16,9 +16,17 @@ from src.external.hptr.src.models.modules.multi_modal import MultiModalAnchors
 from src.external.hptr.src.data_modules.agent_centric import AgentCentricPreProcessing
 from src.external.hptr.src.data_modules.ac_global import AgentCentricGlobal
 
-from src.modeling.modules.lm_utils import create_vocabulary, tokenize_motion, get_attention_mask
+from src.modeling.modules.lm_utils import create_vocabulary, tokenize_motion, get_attention_mask, nucleus_sampling, interpolate_trajectory, cluster_rollouts, non_maximum_suppression
+from src.external.hptr.src.utils.transform_utils import torch_pos2global
 from src.modeling.modules.transformer import TransformerDecoder
 from tensordict import TensorDict
+from src.modeling.modules.av2_metrics import (
+    compute_world_ade,
+    compute_world_fde,
+    compute_world_brier_fde,
+    compute_world_misses,
+    compute_world_collisions
+)
 
 class MimoLM(pl.LightningModule):
     def __init__(
@@ -37,10 +45,10 @@ class MimoLM(pl.LightningModule):
         # input_projections: DictConfig,
         # early_fusion_encoder: DictConfig,
         data_size,
-        n_rollouts = 1,
+        n_rollouts,
+        learning_rate,
         sampling_rate = 5,
         n_targets = 8,
-        learning_rate = 3.e-06,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -62,7 +70,7 @@ class MimoLM(pl.LightningModule):
             ('pre_2', AgentCentricGlobal(sampling_rate = self.sampling_rate,
                                 data_size=data_size,
                                time_step_current=49,
-                                dropout_p_history=0.15, 
+                                dropout_p_history=0.2, 
                                 add_ohe=True,
                                 pl_aggr=False,
                                 pose_pe= {"agent": "xy_dir",
@@ -101,7 +109,7 @@ class MimoLM(pl.LightningModule):
                                 n_time_steps = 110,
                                 n_target = self.n_targets, #should be same as AgentCentricProcessing
                                 time_step_end = 49,
-                                dropout_rate = 0.1,
+                                dropout_rate = 0.2,
                                 n_rollouts = self.n_rollouts,
                                 n_heads = 2,
                                 n_layers = 2,)
@@ -109,6 +117,37 @@ class MimoLM(pl.LightningModule):
         self.logsoftmax = torch.nn.LogSoftmax(dim=-1)
         self.criterion = torch.nn.NLLLoss()
 
+        self.validation_output = {
+                    'BrierMinFDE' : np.zeros(shape=[24988])
+                    ,'MinFDE' : np.zeros(shape=[24988])
+                    ,'MinADE' : np.zeros(shape=[24988])
+        }
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.AdamW([
+            {'params': self.input_projections.parameters(),
+            'params': self.encoder.parameters(),
+            'params': self.decoder.parameters()}]
+            , lr=self.learning_rate
+            , weight_decay=0.2)
+        lr_scheduler = {
+            "scheduler": torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer
+                                                                    , mode='min'
+                                                                    , factor=0.1
+                                                                    , patience=4
+                                                                    , threshold=0.0001
+                                                                    , threshold_mode='rel'
+                                                                    , cooldown=0
+                                                                    , min_lr=0
+                                                                    , eps=1e-10,),
+            "interval": "epoch",
+            # How many epochs/steps should pass between calls to `scheduler.step()`. 1 corresponds to updating the learning rate after every epoch/step.
+            "frequency": 1,
+            # Metric to to monitor for schedulers like `ReduceLROnPlateau`
+            "monitor": "val_loss",
+        }
+        return [optimizer], [lr_scheduler]
+    
     def training_step(self, batch, **kwargs):
         with torch.no_grad():
             batch = self.preprocessor(batch)
@@ -142,31 +181,6 @@ class MimoLM(pl.LightningModule):
 
         self.log("train_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
         return loss
-
-    def configure_optimizers(self):
-        optimizer = torch.optim.AdamW([
-            {'params': self.input_projections.parameters(),
-            'params': self.encoder.parameters(),
-            'params': self.decoder.parameters()}]
-            , lr=self.learning_rate
-            , weight_decay=0.1)
-        lr_scheduler = {
-            "scheduler": torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer
-                                                                    , mode='min'
-                                                                    , factor=0.1
-                                                                    , patience=4
-                                                                    , threshold=0.0001
-                                                                    , threshold_mode='rel'
-                                                                    , cooldown=0
-                                                                    , min_lr=0
-                                                                    , eps=1e-10,),
-            "interval": "epoch",
-            # How many epochs/steps should pass between calls to `scheduler.step()`. 1 corresponds to updating the learning rate after every epoch/step.
-            "frequency": 1,
-            # Metric to to monitor for schedulers like `ReduceLROnPlateau`
-            "monitor": "val_loss",
-        }
-        return [optimizer], [lr_scheduler]
     
     def validation_step(self, batch, **kwargs):
         batch = self.preprocessor(batch)
@@ -215,6 +229,111 @@ class MimoLM(pl.LightningModule):
         curr_lr = self.trainer.optimizers[0].param_groups[0]['lr']
         self.log("curr_lr", curr_lr, on_step=False, on_epoch=True, prog_bar=True, logger=True) 
         return loss
+    
+    def test_step(self, batch, **kwargs):
+        batch = self.preprocessor(batch)
+        actuals, _ = tokenize_motion(batch["gt/pos"],
+            self.decoder.pos_bins, 
+            self.decoder.verlet_wrapper, 
+            self.decoder.n_verlet_steps)
+        n_batch, n_agents = batch["ac/target_pos"].shape[0], batch["ac/target_pos"].shape[1]
+        
+        input_dict = {
+        k.split("input/")[-1]: v for k, v in batch.items() if "input/" in k
+        }
+        valid = input_dict["target_valid"].any(-1)
+        target_emb, target_valid, other_emb, other_valid, map_emb, map_valid = self.input_projections(target_valid = input_dict["target_valid"], 
+                target_attr = input_dict["target_attr"],
+                other_valid = input_dict["other_valid"],
+                other_attr = input_dict["other_attr"],
+                map_valid = input_dict["map_valid"],
+                map_attr = input_dict["map_attr"],)
+        
+        fused_emb, fused_emb_invalid = self.encoder(
+                    target_emb, target_valid, other_emb, other_valid, map_emb, map_valid, input_dict["target_type"], valid
+                )
+        
+        batch["ac/target_pos"] = batch["ac/target_pos"].repeat(self.n_rollouts, 1, 1, 1)
+        batch["ac/target_type"] = batch["ac/target_type"].repeat(self.n_rollouts, 1, 1)
+        fused_emb = fused_emb.repeat(self.n_rollouts, 1, 1)
+        for _ in range(self.inference_steps):
+            last_pos = batch["ac/target_pos"][:, :, -1]
+            motion_tokens = batch["ac/target_pos"]
+            target_types = batch["ac/target_type"]
+            pred, last_token = self.decoder(motion_tokens, target_types, fused_emb, fused_emb_invalid)
+            pred = nucleus_sampling(pred[:, -1])
+            pred = self.decoder.vocabulary[pred][:, 1:].unflatten(dim=0, sizes=(n_batch * self.n_rollouts, n_agents))
+            pred = self.decoder.verlet_wrapper[pred]
+            pred = torch.clamp(last_token + pred, min=0, max=127)
+            pred = self.decoder.pos_bins[pred.long()]
+            pred = last_pos + pred
+            batch["ac/target_pos"] = torch.cat((batch["ac/target_pos"], pred.unsqueeze(2)), dim = -2)
+
+        preds = batch["ac/target_pos"][:, :, 25:, ]
+        # upsample from 5 Hz to 10 Hz
+        preds = interpolate_trajectory(preds, self.sampling_step, self.device)
+        # NMS to remove redundant rollouts
+        filtered_rollouts = non_maximum_suppression(preds, threshold=3.0)
+        # KMeans to find cluster centres aka output worlds
+        mode_trajectories, mode_probs = cluster_rollouts(filtered_rollouts, n_clusters=6)
+        # transform to global coordinate
+        trajs = torch_pos2global(mode_trajectories, batch['ref/pos'].repeat(6, 1, 1, 1), batch["ref/rot"].repeat(6, 1, 1, 1))
+        gt_pos = torch_pos2global(batch["gt/pos"], batch['ref/pos'], batch["ref/rot"])
+        
+        forecasted_trajs = trajs.permute(1, 0, 2, 3).cpu()
+        gt_trajs = gt_pos.squeeze(0).cpu()
+        mode_probs = mode_probs.cpu()
+        self.validation_output['BrierMinFDE'][batch['episode_idx'][0]] = min(compute_world_brier_fde(forecasted_trajs, gt_trajs, mode_probs)[:6])
+        self.validation_output['MinADE'][batch['episode_idx'][0]] = min(compute_world_ade(forecasted_trajs, gt_trajs))
+        self.validation_output['MinFDE'][batch['episode_idx'][0]] = min(compute_world_fde(forecasted_trajs, gt_trajs))
+        return -1
+     
+
+    def predict_step(self, batch, **kwargs):
+        batch = self.preprocessor(batch)
+        actuals, _ = tokenize_motion(batch["gt/pos"],
+            self.decoder.pos_bins, 
+            self.decoder.verlet_wrapper, 
+            self.decoder.n_verlet_steps)
+        n_batch, n_agents = batch["ac/target_pos"].shape[0], batch["ac/target_pos"].shape[1]
+        
+        input_dict = {
+        k.split("input/")[-1]: v for k, v in batch.items() if "input/" in k
+        }
+        valid = input_dict["target_valid"].any(-1)
+        target_emb, target_valid, other_emb, other_valid, map_emb, map_valid = self.input_projections(target_valid = input_dict["target_valid"], 
+                target_attr = input_dict["target_attr"],
+                other_valid = input_dict["other_valid"],
+                other_attr = input_dict["other_attr"],
+                map_valid = input_dict["map_valid"],
+                map_attr = input_dict["map_attr"],)
+        
+        fused_emb, fused_emb_invalid = self.encoder(
+                    target_emb, target_valid, other_emb, other_valid, map_emb, map_valid, input_dict["target_type"], valid
+                )
+        
+        batch["ac/target_pos"] = batch["ac/target_pos"].repeat(self.n_rollouts, 1, 1, 1)
+        batch["ac/target_type"] = batch["ac/target_type"].repeat(self.n_rollouts, 1, 1)
+        fused_emb = fused_emb.repeat(self.n_rollouts, 1, 1)
+        for _ in range(self.inference_steps):
+            last_pos = batch["ac/target_pos"][:, :, -1]
+            motion_tokens = batch["ac/target_pos"]
+            target_types = batch["ac/target_type"]
+            pred, last_token = self.decoder(motion_tokens, target_types, fused_emb, fused_emb_invalid)
+            pred = nucleus_sampling(pred[:, -1])
+            pred = self.decoder.vocabulary[pred][:, 1:].unflatten(dim=0, sizes=(n_batch * self.n_rollouts, n_agents))
+            pred = self.decoder.verlet_wrapper[pred]
+            pred = torch.clamp(last_token + pred, min=0, max=127)
+            pred = self.decoder.pos_bins[pred.long()]
+            pred = last_pos + pred
+            batch["ac/target_pos"] = torch.cat((batch["ac/target_pos"], pred.unsqueeze(2)), dim = -2)
+
+        print(f"post inf shape: {batch["ac/target_pos"].shape}")
+        preds = batch["ac/target_pos"][:, :, 25:, ]
+        print(f"preds shape: {preds.shape}")
+        
+        # k-means and NMS
+        return {"preds": preds, "batch": batch}
 
 class InputProjections(nn.Module):
     def __init__(
@@ -362,11 +481,11 @@ class MotionDecoder(nn.Module):
             n_target: int,
             emb_dim: int,
             dropout_rate: int,
+            n_rollouts: int,
             n_quantization_bins: int = 128,
             n_verlet_steps: int = 13,
             n_time_steps: int = 110,
             time_step_end: int = 49,
-            n_rollouts: int = 64,
             n_heads: int = 2,
             n_layers: int = 1,
             ) -> None:
@@ -413,7 +532,6 @@ class MotionDecoder(nn.Module):
             nn.Linear(self.emb_dim, 512),
             nn.GELU(),
             nn.Linear(512, 256),
-            nn.Dropout(p=self.dropout_rate),
             nn.GELU(),
             nn.Linear(256, self.vocab_size)
         )
@@ -455,13 +573,14 @@ class MotionDecoder(nn.Module):
         
         #self attending motion tokens + cross attending to scene emebeddings
         query = motion_embeddings
-         # type_as casting simply to move to right device with Lightning
+        key = fused_emb
+        # MotionLM repeats embeddings across rollouts before cross-attention only, here we repeat for both self and cross attention
         for decoder_block in self.decoder_layers:
-            if query.shape[0] != n_batch:
+            if query.shape[0] != n_batch :
                 query = query.unflatten(dim=0, sizes=(n_batch, n_agents)).flatten(1, 2)
-            attn_mask = get_attention_mask(n_steps, query.shape[1]).type_as(self.attn_type)
+            attn_mask = get_attention_mask(n_steps, query.shape[1]).type_as(self.attn_type) # type_as casting simply to move to right device with Lightning
             query = decoder_block(query = query, 
-                                  key = fused_emb, 
+                                  key = key, 
                                   attn_mask = attn_mask,
                                   n_agents = n_agents,
                                   n_steps = n_steps)
