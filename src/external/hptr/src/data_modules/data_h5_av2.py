@@ -60,7 +60,7 @@ class DatasetVal(DatasetBase):
                     out_dict[k] = np.ascontiguousarray(hf[idx_key][k])
                 else:
                     if "/valid" in k or "/state" in k:
-                        _dtype = np.bool
+                        _dtype = bool
                     elif "/idx" in k:
                         _dtype = np.int64
                     else:
@@ -190,7 +190,7 @@ class DataH5av2(LightningDataModule):
     def setup(self, stage: Optional[str] = None) -> None:
         if stage == "fit" or stage is None:
             self.train_dataset = DatasetTrain(self.path_train_h5, self.tensor_size_train)
-            self.val_dataset = DatasetVal(self.path_val_h5, self.tensor_size_val)
+            #self.val_dataset = DatasetVal(self.path_val_h5, self.tensor_size_val)
         elif stage == "validate":
             self.val_dataset = DatasetVal(self.path_val_h5, self.tensor_size_val)
         elif stage == "test":

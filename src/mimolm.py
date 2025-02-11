@@ -70,7 +70,7 @@ class MimoLM(pl.LightningModule):
             ('pre_2', AgentCentricGlobal(sampling_rate = self.sampling_rate,
                                 data_size=data_size,
                                time_step_current=49,
-                                dropout_p_history=0.2, 
+                                dropout_p_history=0.1, 
                                 add_ohe=True,
                                 pl_aggr=False,
                                 pose_pe= {"agent": "xy_dir",
@@ -123,22 +123,14 @@ class MimoLM(pl.LightningModule):
             'params': self.encoder.parameters(),
             'params': self.decoder.parameters()}]
             , lr=self.learning_rate
-            , weight_decay=0.2)
+            , weight_decay=0.4)
         lr_scheduler = {
-            "scheduler": torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer
-                                                                    , mode='min'
-                                                                    , factor=0.1
-                                                                    , patience=4
-                                                                    , threshold=0.0001
-                                                                    , threshold_mode='rel'
-                                                                    , cooldown=0
-                                                                    , min_lr=0
-                                                                    , eps=1e-10,),
+            "scheduler": torch.optim.lr_scheduler.StepLR(optimizer
+                                                         , step_size=5
+                                                         , gamma=0.9),
             "interval": "epoch",
             # How many epochs/steps should pass between calls to `scheduler.step()`. 1 corresponds to updating the learning rate after every epoch/step.
             "frequency": 1,
-            # Metric to to monitor for schedulers like `ReduceLROnPlateau`
-            "monitor": "val_loss",
         }
         return [optimizer], [lr_scheduler]
     
@@ -220,8 +212,6 @@ class MimoLM(pl.LightningModule):
             actuals.flatten(0, 1).flatten(0, 1).repeat(self.n_rollouts))
 
         self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True) 
-        curr_lr = self.trainer.optimizers[0].param_groups[0]['lr']
-        self.log("curr_lr", curr_lr, on_step=False, on_epoch=True, prog_bar=True, logger=True) 
         return loss
     
     def test_step(self, batch, **kwargs):
@@ -267,9 +257,9 @@ class MimoLM(pl.LightningModule):
         # upsample from 5 Hz to 10 Hz
         preds = interpolate_trajectory(preds, self.sampling_step, self.device)
         # NMS to remove redundant rollouts
-        filtered_rollouts = non_maximum_suppression(preds, threshold=3.0)
+        #filtered_rollouts = non_maximum_suppression(preds, threshold=3.0)
         # KMeans to find cluster centres aka output worlds
-        mode_trajectories, mode_probs = cluster_rollouts(filtered_rollouts, n_clusters=6)
+        mode_trajectories, mode_probs = cluster_rollouts(preds, n_clusters=6)
         # transform to global coordinate
         trajs = torch_pos2global(mode_trajectories, batch['ref/pos'].repeat(6, 1, 1, 1), batch["ref/rot"].repeat(6, 1, 1, 1))
         gt_pos = torch_pos2global(batch["gt/pos"], batch['ref/pos'], batch["ref/rot"])
