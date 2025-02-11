@@ -31,19 +31,6 @@ from src.modeling.modules.av2_metrics import (
 class MimoLM(pl.LightningModule):
     def __init__(
         self,
-        # hidden_dim: int,
-        # agent_attr_dim: int,
-        # map_attr_dim: int,
-        # tl_attr_dim: int,
-        # n_pl_node: int,
-        # use_current_tl: bool,
-        # pl_aggr: bool,
-        # n_step_hist: int,
-        # n_decoders: int,
-        # decoder: DictConfig,
-        # tf_cfg: DictConfig,
-        # input_projections: DictConfig,
-        # early_fusion_encoder: DictConfig,
         data_size,
         n_rollouts,
         learning_rate,
@@ -272,53 +259,6 @@ class MimoLM(pl.LightningModule):
         self.log("MinADE", min(compute_world_ade(forecasted_trajs, gt_trajs)), on_step=True, on_epoch=True, prog_bar=True, logger=True) 
         self.log("MinFDE", min(compute_world_fde(forecasted_trajs, gt_trajs)), on_step=True, on_epoch=True, prog_bar=True, logger=True) 
         return -1
-     
-
-    def predict_step(self, batch, **kwargs):
-        batch = self.preprocessor(batch)
-        actuals, _ = tokenize_motion(batch["gt/pos"],
-            self.decoder.pos_bins, 
-            self.decoder.verlet_wrapper, 
-            self.decoder.n_verlet_steps)
-        n_batch, n_agents = batch["ac/target_pos"].shape[0], batch["ac/target_pos"].shape[1]
-        
-        input_dict = {
-        k.split("input/")[-1]: v for k, v in batch.items() if "input/" in k
-        }
-        valid = input_dict["target_valid"].any(-1)
-        target_emb, target_valid, other_emb, other_valid, map_emb, map_valid = self.input_projections(target_valid = input_dict["target_valid"], 
-                target_attr = input_dict["target_attr"],
-                other_valid = input_dict["other_valid"],
-                other_attr = input_dict["other_attr"],
-                map_valid = input_dict["map_valid"],
-                map_attr = input_dict["map_attr"],)
-        
-        fused_emb, fused_emb_invalid = self.encoder(
-                    target_emb, target_valid, other_emb, other_valid, map_emb, map_valid, input_dict["target_type"], valid
-                )
-        
-        batch["ac/target_pos"] = batch["ac/target_pos"].repeat(self.n_rollouts, 1, 1, 1)
-        batch["ac/target_type"] = batch["ac/target_type"].repeat(self.n_rollouts, 1, 1)
-        fused_emb = fused_emb.repeat(self.n_rollouts, 1, 1)
-        for _ in range(self.inference_steps):
-            last_pos = batch["ac/target_pos"][:, :, -1]
-            motion_tokens = batch["ac/target_pos"]
-            target_types = batch["ac/target_type"]
-            pred, last_token = self.decoder(motion_tokens, target_types, fused_emb, fused_emb_invalid)
-            pred = nucleus_sampling(pred[:, -1])
-            pred = self.decoder.vocabulary[pred][:, 1:].unflatten(dim=0, sizes=(n_batch * self.n_rollouts, n_agents))
-            pred = self.decoder.verlet_wrapper[pred]
-            pred = torch.clamp(last_token + pred, min=0, max=127)
-            pred = self.decoder.pos_bins[pred.long()]
-            pred = last_pos + pred
-            batch["ac/target_pos"] = torch.cat((batch["ac/target_pos"], pred.unsqueeze(2)), dim = -2)
-
-        print(f"post inf shape: {batch["ac/target_pos"].shape}")
-        preds = batch["ac/target_pos"][:, :, 25:, ]
-        print(f"preds shape: {preds.shape}")
-        
-        # k-means and NMS
-        return {"preds": preds, "batch": batch}
 
 class InputProjections(nn.Module):
     def __init__(

@@ -79,8 +79,8 @@ class DataH5av2(LightningDataModule):
         filename_train: str = "train",
         filename_val: str = "val", # 24988 scenarios
         filename_test: str = "testing",
-        batch_size: int = 1, # 2 - local, 48 - 1xA100, 1 - testing (rollouts + nms) 
-        num_workers: int = 11,
+        batch_size: int = 128, # 2 - local, 48 - 1xA100, 128 - 1xH200, 1 - testing (rollouts + nms) 
+        num_workers: int = 63, # 15 -local, 11 - Colab, 63 - LL 1xH200
         n_agent: int = 64,  # if not the same as h5 dataset, use dummy agents, for scalability tests.
     ) -> None:
         super().__init__()

@@ -1,6 +1,9 @@
 # Data
 /data/
 
+# Lightning logs
+/notebooks/lightning_logs
+
 # Mac OS-specific storage files
 .DS_Store
 
