@@ -20,13 +20,6 @@ from src.modeling.modules.lm_utils import create_vocabulary, tokenize_motion, ge
 from src.external.hptr.src.utils.transform_utils import torch_pos2global
 from src.modeling.modules.transformer import TransformerDecoder
 from tensordict import TensorDict
-from src.modeling.modules.av2_metrics import (
-    compute_world_ade,
-    compute_world_fde,
-    compute_world_brier_fde,
-    compute_world_misses,
-    compute_world_collisions
-)
 
 class MimoLM(pl.LightningModule):
     def __init__(
@@ -200,65 +193,6 @@ class MimoLM(pl.LightningModule):
 
         self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True) 
         return loss
-    
-    def test_step(self, batch, **kwargs):
-        batch = self.preprocessor(batch)
-        actuals, _ = tokenize_motion(batch["gt/pos"],
-            self.decoder.pos_bins, 
-            self.decoder.verlet_wrapper, 
-            self.decoder.n_verlet_steps)
-        n_batch, n_agents = batch["ac/target_pos"].shape[0], batch["ac/target_pos"].shape[1]
-        
-        input_dict = {
-        k.split("input/")[-1]: v for k, v in batch.items() if "input/" in k
-        }
-        valid = input_dict["target_valid"].any(-1)
-        target_emb, target_valid, other_emb, other_valid, map_emb, map_valid = self.input_projections(target_valid = input_dict["target_valid"], 
-                target_attr = input_dict["target_attr"],
-                other_valid = input_dict["other_valid"],
-                other_attr = input_dict["other_attr"],
-                map_valid = input_dict["map_valid"],
-                map_attr = input_dict["map_attr"],)
-        
-        fused_emb, fused_emb_invalid = self.encoder(
-                    target_emb, target_valid, other_emb, other_valid, map_emb, map_valid, input_dict["target_type"], valid
-                )
-        
-        batch["ac/target_pos"] = batch["ac/target_pos"].repeat(self.n_rollouts, 1, 1, 1)
-        batch["ac/target_type"] = batch["ac/target_type"].repeat(self.n_rollouts, 1, 1)
-        fused_emb = fused_emb.repeat(self.n_rollouts, 1, 1)
-        for _ in range(self.inference_steps):
-            last_pos = batch["ac/target_pos"][:, :, -1]
-            motion_tokens = batch["ac/target_pos"]
-            target_types = batch["ac/target_type"]
-            pred, last_token = self.decoder(motion_tokens, target_types, fused_emb, fused_emb_invalid)
-            pred = nucleus_sampling(pred[:, -1])
-            pred = self.decoder.vocabulary[pred][:, 1:].unflatten(dim=0, sizes=(n_batch * self.n_rollouts, n_agents))
-            pred = self.decoder.verlet_wrapper[pred]
-            pred = torch.clamp(last_token + pred, min=0, max=127)
-            pred = self.decoder.pos_bins[pred.long()]
-            pred = last_pos + pred
-            batch["ac/target_pos"] = torch.cat((batch["ac/target_pos"], pred.unsqueeze(2)), dim = -2)
-
-        preds = batch["ac/target_pos"][:, :, 25:, ]
-        # upsample from 5 Hz to 10 Hz
-        preds = interpolate_trajectory(preds, self.sampling_step, self.device)
-        # NMS to remove redundant rollouts
-        #filtered_rollouts = non_maximum_suppression(preds, threshold=3.0)
-        # KMeans to find cluster centres aka output worlds
-        mode_trajectories, mode_probs = cluster_rollouts(preds, n_clusters=6)
-        # transform to global coordinate
-        trajs = torch_pos2global(mode_trajectories, batch['ref/pos'].repeat(6, 1, 1, 1), batch["ref/rot"].repeat(6, 1, 1, 1))
-        gt_pos = torch_pos2global(batch["gt/pos"], batch['ref/pos'], batch["ref/rot"])
-        
-        forecasted_trajs = trajs.permute(1, 0, 2, 3).cpu()
-        gt_trajs = gt_pos.squeeze(0).cpu()
-        mode_probs = mode_probs.cpu()
-        
-        self.log("BrierMinFDE", min(compute_world_brier_fde(forecasted_trajs, gt_trajs, mode_probs)[:6]), on_step=True, on_epoch=True, prog_bar=True, logger=True) 
-        self.log("MinADE", min(compute_world_ade(forecasted_trajs, gt_trajs)), on_step=True, on_epoch=True, prog_bar=True, logger=True) 
-        self.log("MinFDE", min(compute_world_fde(forecasted_trajs, gt_trajs)), on_step=True, on_epoch=True, prog_bar=True, logger=True) 
-        return -1
 
 class InputProjections(nn.Module):
     def __init__(

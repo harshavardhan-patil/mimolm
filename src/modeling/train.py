@@ -1,30 +1,59 @@
 from pathlib import Path
 
-import typer
+from argparse import ArgumentParser
 from loguru import logger
 from tqdm import tqdm
-
 from src.config import MODELS_DIR, PROCESSED_DATA_DIR
+import sys
+from pathlib import Path
+from os.path  import join
+from src.external.hptr.src.data_modules.data_h5_av2 import DataH5av2
+from src.mimolm import MimoLM
+import lightning as pl
+from lightning.pytorch.tuner import Tuner
+import time
+import torch
+import tqdm
+from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor
+from lightning.pytorch import Trainer, seed_everything
 
-app = typer.Typer()
+def main(args):
+    # Append the directory to your python path using sys
+    sys.path.append('/home/ubuntu/mimolm')
+    # Add the project root to sys.path
+    print(Path.cwd()) 
+    seed_everything(args.seed, workers=True)
 
+    data_module = DataH5av2("/home/ubuntu/mimolm/data")
 
-@app.command()
-def main(
-    # ---- REPLACE DEFAULT PATHS AS APPROPRIATE ----
-    features_path: Path = PROCESSED_DATA_DIR / "features.csv",
-    labels_path: Path = PROCESSED_DATA_DIR / "labels.csv",
-    model_path: Path = MODELS_DIR / "model.pkl",
-    # -----------------------------------------
-):
-    # ---- REPLACE THIS WITH YOUR OWN CODE ----
-    logger.info("Training some model...")
-    for i in tqdm(range(10), total=10):
-        if i == 5:
-            logger.info("Something happened for iteration 5.")
-    logger.success("Modeling training complete.")
-    # -----------------------------------------
+    model = MimoLM(data_size=data_module.tensor_size_train
+                , n_rollouts = args.n_rollouts
+                , learning_rate = args.learning_rate,)
 
+    checkpoint_callback = ModelCheckpoint(
+        save_top_k=-1,  # Save all checkpoints
+        every_n_epochs=1  # Save checkpoint every n epochs
+    )
+    lr_monitor = LearningRateMonitor(logging_interval='epoch')
+    trainer = pl.Trainer(precision='16-mixed',
+                        callbacks=[checkpoint_callback, lr_monitor],
+                        max_epochs=1,
+                        profiler="simple",)
+                        #default_root_dir="/content/drive/MyDrive/Colab/mimolm/ckpts")
+    # tuner = Tuner(trainer)
+
+    # #Run learning rate finder and then train
+    # lr_finder = tuner.lr_find(model=model, train_dataloaders=train_loader, val_dataloaders=val_loader)
+    trainer.fit(model=model, datamodule=data_module), #val_dataloaders=val_loader)#, ckpt_path='/content/drive/MyDrive/Colab/mimolm/ckpts/lightning_logs/version_1/checkpoints/epoch=4-step=20825.ckpt')
+    
 
 if __name__ == "__main__":
-    app()
+    parser = ArgumentParser()
+    parser.add_argument("--accelerator", default=None)
+    parser.add_argument("--devices", default=None)
+    parser.add_argument("--strategy", default=None)
+    parser.add_argument("--seed", default=43)
+    parser.add_argument("--learning_rate", default=1.e-04)
+    parser.add_argument("--n_rollouts", default=1)
+    args = parser.parse_args()
+    main(args)
