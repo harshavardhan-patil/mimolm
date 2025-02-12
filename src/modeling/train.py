@@ -1,31 +1,24 @@
-from pathlib import Path
-
-from argparse import ArgumentParser
-from loguru import logger
-from tqdm import tqdm
-from src.config import MODELS_DIR, PROCESSED_DATA_DIR
 import sys
+# Append the directory to your python path using sys
+sys.path.append('/home/ubuntu/mimolm')
+# Add the project root to sys.path
+print(Path.cwd()) 
+
+from pathlib import Path
+from argparse import ArgumentParser
+from src.config import MODELS_DIR, PROCESSED_DATA_DIR
 from pathlib import Path
 from os.path  import join
 from src.external.hptr.src.data_modules.data_h5_av2 import DataH5av2
 from src.mimolm import MimoLM
-import lightning as pl
 from lightning.pytorch.tuner import Tuner
-import time
-import torch
-import tqdm
 from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor
 from lightning.pytorch import Trainer, seed_everything
 
 def main(args):
-    # Append the directory to your python path using sys
-    sys.path.append('/home/ubuntu/mimolm')
-    # Add the project root to sys.path
-    print(Path.cwd()) 
     seed_everything(args.seed, workers=True)
-
     data_module = DataH5av2("/home/ubuntu/mimolm/data")
-
+    data_module.setup(stage="fit")
     model = MimoLM(data_size=data_module.tensor_size_train
                 , n_rollouts = args.n_rollouts
                 , learning_rate = args.learning_rate,)
@@ -35,10 +28,11 @@ def main(args):
         every_n_epochs=1  # Save checkpoint every n epochs
     )
     lr_monitor = LearningRateMonitor(logging_interval='epoch')
-    trainer = pl.Trainer(precision='16-mixed',
+    trainer = Trainer(precision='16-mixed',
                         callbacks=[checkpoint_callback, lr_monitor],
                         max_epochs=1,
-                        profiler="simple",)
+                        profiler="simple",
+                        devices=args.devices)
                         #default_root_dir="/content/drive/MyDrive/Colab/mimolm/ckpts")
     # tuner = Tuner(trainer)
 

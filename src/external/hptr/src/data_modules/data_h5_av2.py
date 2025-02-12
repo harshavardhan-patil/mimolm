@@ -1,6 +1,6 @@
 # Licensed under the CC BY-NC 4.0 license (https://creativecommons.org/licenses/by-nc/4.0/)
 from typing import Optional, Dict, Any, Tuple
-from pytorch_lightning import LightningDataModule
+from lightning.pytorch import LightningDataModule
 from torch.utils.data import DataLoader, Dataset
 import numpy as np
 import h5py
@@ -79,8 +79,8 @@ class DataH5av2(LightningDataModule):
         filename_train: str = "train",
         filename_val: str = "val", # 24988 scenarios
         filename_test: str = "testing",
-        batch_size: int = 128, # 2 - local, 48 - 1xA100, 128 - 1xH200, 1 - testing (rollouts + nms) 
-        num_workers: int = 63, # 15 -local, 11 - Colab, 63 - LL 1xH200
+        batch_size: int = 96, # 2 - local, 48 - 1xA100, 128 - 1xH200, 1 - testing (rollouts + nms) 
+        num_workers: int = 12, # 15 -local, 11 - Colab, 63 - LL 1xH200
         n_agent: int = 64,  # if not the same as h5 dataset, use dummy agents, for scalability tests.
     ) -> None:
         super().__init__()
@@ -190,7 +190,7 @@ class DataH5av2(LightningDataModule):
     def setup(self, stage: Optional[str] = None) -> None:
         if stage == "fit" or stage is None:
             self.train_dataset = DatasetTrain(self.path_train_h5, self.tensor_size_train)
-            #self.val_dataset = DatasetVal(self.path_val_h5, self.tensor_size_val)
+            # self.val_dataset = DatasetVal(self.path_val_h5, self.tensor_size_val)
         elif stage == "validate":
             self.val_dataset = DatasetVal(self.path_val_h5, self.tensor_size_val)
         elif stage == "test":
