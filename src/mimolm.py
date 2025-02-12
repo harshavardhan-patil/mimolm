@@ -19,7 +19,6 @@ from src.external.hptr.src.data_modules.ac_global import AgentCentricGlobal
 from src.modeling.modules.lm_utils import create_vocabulary, tokenize_motion, get_attention_mask, nucleus_sampling, interpolate_trajectory, cluster_rollouts, non_maximum_suppression
 from src.external.hptr.src.utils.transform_utils import torch_pos2global
 from src.modeling.modules.transformer import TransformerDecoder
-from tensordict import TensorDict
 
 class MimoLM(pl.LightningModule):
     def __init__(
