@@ -17,7 +17,7 @@ from lightning.pytorch import Trainer, seed_everything
 
 def main(args):
     seed_everything(args.seed, workers=True)
-    data_module = DataH5av2("/workspace/mimolm/data")
+    data_module = DataH5av2("/home/ubuntu/mimolm/data")
     data_module.setup(stage="fit")
     model = MimoLM(data_size=data_module.tensor_size_train
                 , n_rollouts = args.n_rollouts
@@ -33,18 +33,18 @@ def main(args):
                         max_epochs=1,
                         profiler="simple",
                         devices=args.devices,
-                        default_root_dir="/workspace/mimolm/ckpts")
-    # tuner = Tuner(trainer)
+                        default_root_dir="/home/ubuntu/mimolm/ckpts")
+    tuner = Tuner(trainer)
 
-    # #Run learning rate finder and then train
-    # lr_finder = tuner.lr_find(model=model, train_dataloaders=train_loader, val_dataloaders=val_loader)
-    trainer.fit(model=model, datamodule=data_module), #val_dataloaders=val_loader)#, ckpt_path='/content/drive/MyDrive/Colab/mimolm/ckpts/lightning_logs/version_1/checkpoints/epoch=4-step=20825.ckpt')
+    #Run learning rate finder and then train
+    tuner.lr_find(model=model, datamodule=data_module)
+    trainer.fit(model=model, datamodule=data_module) #, ckpt_path='/content/drive/MyDrive/Colab/mimolm/ckpts/lightning_logs/version_1/checkpoints/epoch=4-step=20825.ckpt')
     
 
 if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--accelerator", default=None)
-    parser.add_argument("--devices", default=2)
+    parser.add_argument("--devices", default=None)
     parser.add_argument("--strategy", default=None)
     parser.add_argument("--seed", default=43)
     parser.add_argument("--learning_rate", default=1.e-04)

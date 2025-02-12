@@ -29,6 +29,8 @@ class MimoLM(pl.LightningModule):
         learning_rate,
         sampling_rate = 5,
         n_targets = 8,
+        enc_dim = 128,
+        dec_dim = 256,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -61,7 +63,7 @@ class MimoLM(pl.LightningModule):
                                     map_attr_dim=self.preprocessor.pre_2.model_kwargs["map_attr_dim"],
                                     n_step_hist=self.preprocessor.pre_2.model_kwargs["n_step_hist"],
                                     n_pl_node=self.preprocessor.pre_2.model_kwargs["n_pl_node"],
-                                    hidden_dim=128,
+                                    hidden_dim=enc_dim,
                                     add_learned_pe=True,
                                     n_layer_mlp=3,
                                     mlp_cfg={"end_layer_activation" : True,
@@ -69,7 +71,7 @@ class MimoLM(pl.LightningModule):
                                                 "use_batchnorm" : False,
                                                 "dropout_p" : None,})
 
-        self.encoder = EarlyFusionEncoder(hidden_dim=128,
+        self.encoder = EarlyFusionEncoder(hidden_dim=enc_dim,
                                     tf_cfg={"n_head": 2,
                                             "dropout_p": 0.1,
                                             "norm_first": True,
@@ -78,13 +80,14 @@ class MimoLM(pl.LightningModule):
                                                 "mode_emb": "none", # linear, mlp, add, none
                                                 "mode_init": "xavier", # uniform, xavier
                                                 "scale": 5.0},
-                                    n_latent_query=128,
+                                    n_latent_query=enc_dim - 32,
                                     n_encoder_layers=2)  
 
         self.decoder = MotionDecoder(max_delta = 8.0, #meters
                                 n_quantization_bins = 128,
                                 n_verlet_steps = 13,
-                                emb_dim = 128,
+                                emb_dim = dec_dim,
+                                enc_dim = enc_dim,
                                 sampling_rate = self.sampling_rate,
                                 n_time_steps = 110,
                                 n_target = self.n_targets, #should be same as AgentCentricProcessing
@@ -148,51 +151,51 @@ class MimoLM(pl.LightningModule):
         self.log("train_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
         return loss
     
-    def validation_step(self, batch, **kwargs):
-        batch = self.preprocessor(batch)
-        actuals, _ = tokenize_motion(batch["gt/pos"],
-            self.decoder.pos_bins, 
-            self.decoder.verlet_wrapper, 
-            self.decoder.n_verlet_steps)
-        n_batch, n_agents = batch["ac/target_pos"].shape[0], batch["ac/target_pos"].shape[1]
+    # def validation_step(self, batch, **kwargs):
+    #     batch = self.preprocessor(batch)
+    #     actuals, _ = tokenize_motion(batch["gt/pos"],
+    #         self.decoder.pos_bins, 
+    #         self.decoder.verlet_wrapper, 
+    #         self.decoder.n_verlet_steps)
+    #     n_batch, n_agents = batch["ac/target_pos"].shape[0], batch["ac/target_pos"].shape[1]
         
-        input_dict = {
-        k.split("input/")[-1]: v for k, v in batch.items() if "input/" in k
-        }
-        valid = input_dict["target_valid"].any(-1)
-        target_emb, target_valid, other_emb, other_valid, map_emb, map_valid = self.input_projections(target_valid = input_dict["target_valid"], 
-                target_attr = input_dict["target_attr"],
-                other_valid = input_dict["other_valid"],
-                other_attr = input_dict["other_attr"],
-                map_valid = input_dict["map_valid"],
-                map_attr = input_dict["map_attr"],)
+    #     input_dict = {
+    #     k.split("input/")[-1]: v for k, v in batch.items() if "input/" in k
+    #     }
+    #     valid = input_dict["target_valid"].any(-1)
+    #     target_emb, target_valid, other_emb, other_valid, map_emb, map_valid = self.input_projections(target_valid = input_dict["target_valid"], 
+    #             target_attr = input_dict["target_attr"],
+    #             other_valid = input_dict["other_valid"],
+    #             other_attr = input_dict["other_attr"],
+    #             map_valid = input_dict["map_valid"],
+    #             map_attr = input_dict["map_attr"],)
         
-        fused_emb, fused_emb_invalid = self.encoder(
-                    target_emb, target_valid, other_emb, other_valid, map_emb, map_valid, input_dict["target_type"], valid
-                )
-        preds = []
-        for _ in range(self.inference_steps):
-            last_pos = batch["ac/target_pos"][:, :, -1]
-            motion_tokens = batch["ac/target_pos"]
-            target_types = batch["ac/target_type"]
-            pred, last_token = self.decoder(motion_tokens, target_types, fused_emb, fused_emb_invalid)
-            preds.append(pred[:, -1].unsqueeze(1))
-            pred = F.softmax(pred[:, -1], dim=-1).argmax(dim=1)
-            pred = self.decoder.vocabulary[pred][:, 1:].unflatten(dim=0, sizes=(n_batch, n_agents))
-            pred = self.decoder.verlet_wrapper[pred]
-            pred = torch.clamp(last_token + pred, min=0, max=127)
-            pred = self.decoder.pos_bins[pred.long()]
-            pred = last_pos + pred
-            batch["ac/target_pos"] = torch.cat((batch["ac/target_pos"], pred.unsqueeze(2)), dim = -2)
+    #     fused_emb, fused_emb_invalid = self.encoder(
+    #                 target_emb, target_valid, other_emb, other_valid, map_emb, map_valid, input_dict["target_type"], valid
+    #             )
+    #     preds = []
+    #     for _ in range(self.inference_steps):
+    #         last_pos = batch["ac/target_pos"][:, :, -1]
+    #         motion_tokens = batch["ac/target_pos"]
+    #         target_types = batch["ac/target_type"]
+    #         pred, last_token = self.decoder(motion_tokens, target_types, fused_emb, fused_emb_invalid)
+    #         preds.append(pred[:, -1].unsqueeze(1))
+    #         pred = F.softmax(pred[:, -1], dim=-1).argmax(dim=1)
+    #         pred = self.decoder.vocabulary[pred][:, 1:].unflatten(dim=0, sizes=(n_batch, n_agents))
+    #         pred = self.decoder.verlet_wrapper[pred]
+    #         pred = torch.clamp(last_token + pred, min=0, max=127)
+    #         pred = self.decoder.pos_bins[pred.long()]
+    #         pred = last_pos + pred
+    #         batch["ac/target_pos"] = torch.cat((batch["ac/target_pos"], pred.unsqueeze(2)), dim = -2)
 
-        preds = torch.cat(preds, dim=1)
-        preds = F.interpolate(preds.permute(0, 2, 1), size=60, mode="linear", align_corners=True).permute(0, 2, 1)
-        loss = self.criterion(
-            self.logsoftmax(preds.flatten(0, 1)), 
-            actuals.flatten(0, 1).flatten(0, 1).repeat(self.n_rollouts))
+    #     preds = torch.cat(preds, dim=1)
+    #     preds = F.interpolate(preds.permute(0, 2, 1), size=60, mode="linear", align_corners=True).permute(0, 2, 1)
+    #     loss = self.criterion(
+    #         self.logsoftmax(preds.flatten(0, 1)), 
+    #         actuals.flatten(0, 1).flatten(0, 1).repeat(self.n_rollouts))
 
-        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True) 
-        return loss
+    #     self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True) 
+    #     return loss
 
 class InputProjections(nn.Module):
     def __init__(
@@ -339,6 +342,7 @@ class MotionDecoder(nn.Module):
             sampling_rate: int,
             n_target: int,
             emb_dim: int,
+            enc_dim: int,
             dropout_rate: int,
             n_rollouts: int,
             n_quantization_bins: int = 128,
@@ -387,6 +391,12 @@ class MotionDecoder(nn.Module):
                                 n_rollouts=self.n_rollouts) for _ in range(n_layers)]
         )
 
+        self.scene_emb_layers = nn.Sequential(
+            nn.Linear(enc_dim, enc_dim + 64),
+            nn.GELU(),
+            nn.Linear(enc_dim + 64, self.emb_dim)
+        )
+
         self.fully_connected_layers = nn.Sequential(
             nn.Linear(self.emb_dim, 512),
             nn.GELU(),
@@ -432,6 +442,8 @@ class MotionDecoder(nn.Module):
         
         #self attending motion tokens + cross attending to scene emebeddings
         query = motion_embeddings
+        # ensure scene embedding matches decoder dimension
+        fused_emb = self.scene_emb_layers(fused_emb)
         key = fused_emb
         # MotionLM repeats embeddings across rollouts before cross-attention only, here we repeat for both self and cross attention
         for decoder_block in self.decoder_layers:
