@@ -32,8 +32,8 @@ def main(args):
                         callbacks=[checkpoint_callback, lr_monitor],
                         max_epochs=1,
                         profiler="simple",
-                        devices=args.devices)
-                        #default_root_dir="/content/drive/MyDrive/Colab/mimolm/ckpts")
+                        devices=args.devices,
+                        default_root_dir="/home/ubuntu/mimolm/ckpts")
     # tuner = Tuner(trainer)
 
     # #Run learning rate finder and then train
