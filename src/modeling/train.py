@@ -21,8 +21,7 @@ def main(args):
         BASE_PATH = '/home/ubuntu/'
     else: 
         BASE_PATH = '/home/harshavardhan-patil/Work/Projects/'
-    torch.set_float32_matmul_precision("high")
-    torch.backends.cuda.matmul.allow_tf32 = True
+        
     seed_everything(args.seed, workers=True)
     data_module = DataH5av2(BASE_PATH + "mimolm/data")
     data_module.setup(stage="fit")
@@ -39,7 +38,7 @@ def main(args):
                         callbacks=[checkpoint_callback, lr_monitor],
                         max_epochs=int(args.max_epochs),
                         profiler="simple",
-                        devices=args.devices,
+                        devices=int(args.devices),
                         default_root_dir=BASE_PATH + "mimolm/ckpts")
     # tuner = Tuner(trainer)
 
