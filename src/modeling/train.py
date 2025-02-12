@@ -1,10 +1,10 @@
 import sys
+from pathlib import Path
 # Append the directory to your python path using sys
-sys.path.append('/home/ubuntu/mimolm')
+sys.path.append('/workspace/mimolm')
 # Add the project root to sys.path
 print(Path.cwd()) 
 
-from pathlib import Path
 from argparse import ArgumentParser
 from src.config import MODELS_DIR, PROCESSED_DATA_DIR
 from pathlib import Path
@@ -17,7 +17,7 @@ from lightning.pytorch import Trainer, seed_everything
 
 def main(args):
     seed_everything(args.seed, workers=True)
-    data_module = DataH5av2("/home/ubuntu/mimolm/data")
+    data_module = DataH5av2("/workspace/mimolm/data")
     data_module.setup(stage="fit")
     model = MimoLM(data_size=data_module.tensor_size_train
                 , n_rollouts = args.n_rollouts
@@ -33,7 +33,7 @@ def main(args):
                         max_epochs=1,
                         profiler="simple",
                         devices=args.devices,
-                        default_root_dir="/home/ubuntu/mimolm/ckpts")
+                        default_root_dir="/workspace/mimolm/ckpts")
     # tuner = Tuner(trainer)
 
     # #Run learning rate finder and then train
@@ -44,7 +44,7 @@ def main(args):
 if __name__ == "__main__":
     parser = ArgumentParser()
     parser.add_argument("--accelerator", default=None)
-    parser.add_argument("--devices", default=None)
+    parser.add_argument("--devices", default=2)
     parser.add_argument("--strategy", default=None)
     parser.add_argument("--seed", default=43)
     parser.add_argument("--learning_rate", default=1.e-04)

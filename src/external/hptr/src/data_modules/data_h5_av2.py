@@ -34,7 +34,7 @@ class DatasetTrain(DatasetBase):
                     out_dict[k] = np.ascontiguousarray(hf[idx_key][k])
                 else:
                     if "/valid" in k or "/state" in k:
-                        _dtype = np.bool
+                        _dtype = bool
                     elif "/idx" in k:
                         _dtype = np.int64
                     else:
