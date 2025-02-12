@@ -96,8 +96,7 @@ class MimoLM(pl.LightningModule):
                                 n_heads = 2,
                                 n_layers = 2,)
         
-        self.logsoftmax = torch.nn.LogSoftmax(dim=-1)
-        self.criterion = torch.nn.NLLLoss()
+        self.criterion = torch.nn.CrossEntropyLoss()
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW([
@@ -142,59 +141,51 @@ class MimoLM(pl.LightningModule):
                 )
         pred, _ = self.decoder(motion_tokens, target_types, fused_emb, fused_emb_invalid)
         pred = pred[:, self.inference_start:, :]
-        pred = F.interpolate(pred.permute(0, 2, 1), size=60, mode="linear", align_corners=True).permute(0, 2, 1)
-        loss = self.criterion(
-            self.logsoftmax(pred.flatten(0, 1)), 
-            actuals.flatten(0, 1).flatten(0, 1).repeat(self.n_rollouts))
-
+        loss = self.criterion(pred.flatten(0, 1), actuals[:, :, ::self.sampling_step].flatten(0, 2))
         self.log("train_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
         return loss
     
-    # def validation_step(self, batch, **kwargs):
-    #     batch = self.preprocessor(batch)
-    #     actuals, _ = tokenize_motion(batch["gt/pos"],
-    #         self.decoder.pos_bins, 
-    #         self.decoder.verlet_wrapper, 
-    #         self.decoder.n_verlet_steps)
-    #     n_batch, n_agents = batch["ac/target_pos"].shape[0], batch["ac/target_pos"].shape[1]
+    def validation_step(self, batch, **kwargs):
+        batch = self.preprocessor(batch)
+        actuals, _ = tokenize_motion(batch["gt/pos"],
+            self.decoder.pos_bins, 
+            self.decoder.verlet_wrapper, 
+            self.decoder.n_verlet_steps)
+        n_batch, n_agents = batch["ac/target_pos"].shape[0], batch["ac/target_pos"].shape[1]
         
-    #     input_dict = {
-    #     k.split("input/")[-1]: v for k, v in batch.items() if "input/" in k
-    #     }
-    #     valid = input_dict["target_valid"].any(-1)
-    #     target_emb, target_valid, other_emb, other_valid, map_emb, map_valid = self.input_projections(target_valid = input_dict["target_valid"], 
-    #             target_attr = input_dict["target_attr"],
-    #             other_valid = input_dict["other_valid"],
-    #             other_attr = input_dict["other_attr"],
-    #             map_valid = input_dict["map_valid"],
-    #             map_attr = input_dict["map_attr"],)
+        input_dict = {
+        k.split("input/")[-1]: v for k, v in batch.items() if "input/" in k
+        }
+        valid = input_dict["target_valid"].any(-1)
+        target_emb, target_valid, other_emb, other_valid, map_emb, map_valid = self.input_projections(target_valid = input_dict["target_valid"], 
+                target_attr = input_dict["target_attr"],
+                other_valid = input_dict["other_valid"],
+                other_attr = input_dict["other_attr"],
+                map_valid = input_dict["map_valid"],
+                map_attr = input_dict["map_attr"],)
         
-    #     fused_emb, fused_emb_invalid = self.encoder(
-    #                 target_emb, target_valid, other_emb, other_valid, map_emb, map_valid, input_dict["target_type"], valid
-    #             )
-    #     preds = []
-    #     for _ in range(self.inference_steps):
-    #         last_pos = batch["ac/target_pos"][:, :, -1]
-    #         motion_tokens = batch["ac/target_pos"]
-    #         target_types = batch["ac/target_type"]
-    #         pred, last_token = self.decoder(motion_tokens, target_types, fused_emb, fused_emb_invalid)
-    #         preds.append(pred[:, -1].unsqueeze(1))
-    #         pred = F.softmax(pred[:, -1], dim=-1).argmax(dim=1)
-    #         pred = self.decoder.vocabulary[pred][:, 1:].unflatten(dim=0, sizes=(n_batch, n_agents))
-    #         pred = self.decoder.verlet_wrapper[pred]
-    #         pred = torch.clamp(last_token + pred, min=0, max=127)
-    #         pred = self.decoder.pos_bins[pred.long()]
-    #         pred = last_pos + pred
-    #         batch["ac/target_pos"] = torch.cat((batch["ac/target_pos"], pred.unsqueeze(2)), dim = -2)
+        fused_emb, fused_emb_invalid = self.encoder(
+                    target_emb, target_valid, other_emb, other_valid, map_emb, map_valid, input_dict["target_type"], valid
+                )
+        preds = []
+        for _ in range(self.inference_steps):
+            last_pos = batch["ac/target_pos"][:, :, -1]
+            motion_tokens = batch["ac/target_pos"]
+            target_types = batch["ac/target_type"]
+            pred, last_token = self.decoder(motion_tokens, target_types, fused_emb, fused_emb_invalid)
+            preds.append(pred[:, -1].unsqueeze(1))
+            pred = F.softmax(pred[:, -1], dim=-1).argmax(dim=1)
+            pred = self.decoder.vocabulary[pred][:, 1:].unflatten(dim=0, sizes=(n_batch, n_agents))
+            pred = self.decoder.verlet_wrapper[pred]
+            pred = torch.clamp(last_token + pred, min=0, max=127)
+            pred = self.decoder.pos_bins[pred.long()]
+            pred = last_pos + pred
+            batch["ac/target_pos"] = torch.cat((batch["ac/target_pos"], pred.unsqueeze(2)), dim = -2)
 
-    #     preds = torch.cat(preds, dim=1)
-    #     preds = F.interpolate(preds.permute(0, 2, 1), size=60, mode="linear", align_corners=True).permute(0, 2, 1)
-    #     loss = self.criterion(
-    #         self.logsoftmax(preds.flatten(0, 1)), 
-    #         actuals.flatten(0, 1).flatten(0, 1).repeat(self.n_rollouts))
-
-    #     self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True) 
-    #     return loss
+        preds = torch.cat(preds, dim=1)
+        loss = self.criterion(preds.flatten(0, 1), actuals[:, :, ::self.sampling_step].flatten(0, 2))
+        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True) 
+        return loss
 
 class InputProjections(nn.Module):
     def __init__(
