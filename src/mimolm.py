@@ -122,6 +122,7 @@ class MimoLM(pl.LightningModule):
                                 self.decoder.pos_bins, 
                                 self.decoder.verlet_wrapper, 
                                 self.decoder.n_verlet_steps)
+            n_batch = batch["ac/target_pos"].shape[0]
             
         motion_tokens = torch.cat((batch["ac/target_pos"], batch["gt/pos"][:, :, ::self.sampling_step,]), dim = -2)
         target_types = batch["ac/target_type"]
@@ -142,7 +143,7 @@ class MimoLM(pl.LightningModule):
         pred, _ = self.decoder(motion_tokens, target_types, fused_emb, fused_emb_invalid)
         pred = pred[:, self.inference_start - 1: -1, :]
         loss = self.criterion(pred.flatten(0, 1), actuals[:, :, ::self.sampling_step].flatten(0, 2))
-        self.log("train_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+        self.log("train_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True, batch_size=n_batch)
         return loss
     
     def validation_step(self, batch, **kwargs):
@@ -184,7 +185,7 @@ class MimoLM(pl.LightningModule):
 
         preds = torch.cat(preds, dim=1)
         loss = self.criterion(preds.flatten(0, 1), actuals[:, :, ::self.sampling_step].flatten(0, 2))
-        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True) 
+        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True, batch_size=n_batch) 
         return loss
 
 class InputProjections(nn.Module):
