@@ -14,10 +14,17 @@ from src.mimolm import MimoLM
 from lightning.pytorch.tuner import Tuner
 from lightning.pytorch.callbacks import ModelCheckpoint, LearningRateMonitor
 from lightning.pytorch import Trainer, seed_everything
+import torch
 
 def main(args):
+    if int(args.devices) > 1:
+        BASE_PATH = '/home/ubuntu/'
+    else: 
+        BASE_PATH = '/home/harshavardhan-patil/Work/Projects/'
+    torch.set_float32_matmul_precision("high")
+    torch.backends.cuda.matmul.allow_tf32 = True
     seed_everything(args.seed, workers=True)
-    data_module = DataH5av2("/home/ubuntu/mimolm/data")
+    data_module = DataH5av2(BASE_PATH + "mimolm/data")
     data_module.setup(stage="fit")
     model = MimoLM(data_size=data_module.tensor_size_train
                 , n_rollouts = args.n_rollouts
@@ -30,15 +37,15 @@ def main(args):
     lr_monitor = LearningRateMonitor(logging_interval='epoch')
     trainer = Trainer(precision='16-mixed',
                         callbacks=[checkpoint_callback, lr_monitor],
-                        max_epochs=args.max_epochs,
+                        max_epochs=int(args.max_epochs),
                         profiler="simple",
                         devices=args.devices,
-                        default_root_dir="/home/ubuntu/mimolm/ckpts")
-    tuner = Tuner(trainer)
+                        default_root_dir=BASE_PATH + "mimolm/ckpts")
+    # tuner = Tuner(trainer)
 
-    #Run learning rate finder and then train
-    tuner.lr_find(model=model, datamodule=data_module)
-    trainer.fit(model=model, datamodule=data_module) #, ckpt_path='/content/drive/MyDrive/Colab/mimolm/ckpts/lightning_logs/version_1/checkpoints/epoch=4-step=20825.ckpt')
+    # #Run learning rate finder and then train
+    # tuner.lr_find(model=model, datamodule=data_module)
+    trainer.fit(model=model, datamodule=data_module, ckpt_path=BASE_PATH + 'mimolm/ckpts/lightning_logs/version_0/checkpoints/epoch=9-step=2610.ckpt')
     
 
 if __name__ == "__main__":
