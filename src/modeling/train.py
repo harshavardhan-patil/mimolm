@@ -30,7 +30,7 @@ def main(args):
     lr_monitor = LearningRateMonitor(logging_interval='epoch')
     trainer = Trainer(precision='16-mixed',
                         callbacks=[checkpoint_callback, lr_monitor],
-                        max_epochs=1,
+                        max_epochs=args.max_epochs,
                         profiler="simple",
                         devices=args.devices,
                         default_root_dir="/home/ubuntu/mimolm/ckpts")
@@ -49,5 +49,6 @@ if __name__ == "__main__":
     parser.add_argument("--seed", default=43)
     parser.add_argument("--learning_rate", default=1.e-04)
     parser.add_argument("--n_rollouts", default=1)
+    parser.add_argument("--max_epochs", default=1)
     args = parser.parse_args()
     main(args)
