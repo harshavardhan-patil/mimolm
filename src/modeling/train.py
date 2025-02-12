@@ -1,7 +1,7 @@
 import sys
 from pathlib import Path
 # Append the directory to your python path using sys
-sys.path.append('/workspace/mimolm')
+sys.path.append('/home/ubuntu/mimolm')
 # Add the project root to sys.path
 print(Path.cwd()) 
 
