@@ -79,8 +79,8 @@ class DataH5av2(LightningDataModule):
         filename_train: str = "train",
         filename_val: str = "val", # 24988 scenarios
         filename_test: str = "testing",
-        batch_size: int = 96, # 2 - local, 48 - 1xA100, 128 - 1xH200, 1 - testing (rollouts + nms) 
-        num_workers: int = 12, # 15 -local, 11 - Colab, 63 - LL 1xH200
+        batch_size: int = 112, # 112 8x80-GB, 2 - local, 48 - 1xA100, 128 - 1xH200, 1 - testing (rollouts + nms) 
+        num_workers: int = 26, # 15 -local, 11 - Colab, 63 - LL 1xH200
         n_agent: int = 64,  # if not the same as h5 dataset, use dummy agents, for scalability tests.
     ) -> None:
         super().__init__()
@@ -211,7 +211,7 @@ class DataH5av2(LightningDataModule):
             ds,
             batch_size=batch_size,
             num_workers=num_workers,
-            pin_memory=True,
+            pin_memory=False,
             shuffle=False,
             drop_last=False,
             persistent_workers=True,
