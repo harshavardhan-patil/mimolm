@@ -35,7 +35,7 @@ class MimoLM(pl.LightningModule):
         learning_rate,
         sampling_rate = 5,
         n_targets = 8,
-        enc_dim = 128,
+        enc_dim = 128, #192
         dec_dim = 256,
         n_heads = 2,
         n_layers = 2,
@@ -152,7 +152,7 @@ class MimoLM(pl.LightningModule):
         pred, _ = self.decoder(motion_tokens, target_types, fused_emb, fused_emb_invalid)
         pred = pred[:, self.inference_start - 1: -1, :]
         loss = self.criterion(pred.flatten(0, 1), actuals[:, :, ::self.sampling_step].flatten(0, 2))
-        self.log("train_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True, batch_size=n_batch)
+        self.log("train_loss", loss, on_step=True, on_epoch=False, prog_bar=True, logger=True, sync_dist=True, batch_size=n_batch)
         return loss
     
     def validation_step(self, batch, **kwargs):
@@ -194,7 +194,26 @@ class MimoLM(pl.LightningModule):
 
         preds = torch.cat(preds, dim=1)
         loss = self.criterion(preds.flatten(0, 1), actuals[:, :, ::self.sampling_step].flatten(0, 2))
-        self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True, batch_size=n_batch) 
+        self.log("val_loss", loss, on_step=True, on_epoch=False, prog_bar=True, logger=True, sync_dist=True, batch_size=n_batch) 
+
+        preds = batch["ac/target_pos"][:, :, 25:, ]
+        # upsample from 5 Hz to 10 Hz
+        preds = interpolate_trajectory(preds, self.sampling_step, self.device)
+        minade = [0] * n_batch
+        minfde = [0] * n_batch
+        for n in range(n_batch):
+            mode_trajectories = preds[n * self.n_rollouts:(n + 1) * self.n_rollouts,]
+            # transform to global coordinate
+            trajs = torch_pos2global(mode_trajectories, batch['ref/pos'][n:n+1], batch["ref/rot"][n:n+1])
+            gt_pos = torch_pos2global(batch["gt/pos"][n:n+1], batch['ref/pos'][n:n+1], batch["ref/rot"][n:n+1])
+            
+            forecasted_trajs = trajs.permute(1, 0, 2, 3).cpu()
+            gt_trajs = gt_pos.squeeze(0).cpu()
+            minade[n] = min(compute_world_ade(forecasted_trajs, gt_trajs))
+            minfde[n] = min(compute_world_fde(forecasted_trajs, gt_trajs))
+        
+        self.log("MinADE", np.mean(minade), on_step=True, on_epoch=False, prog_bar=True, logger=True) 
+        self.log("MinFDE", np.mean(minfde), on_step=True, on_epoch=False, prog_bar=True, logger=True) 
         return loss
     
     def test_step(self, batch, **kwargs):
