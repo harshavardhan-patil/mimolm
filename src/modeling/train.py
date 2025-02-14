@@ -25,7 +25,8 @@ def main(args):
     seed_everything(args.seed, workers=True)
     data_module = DataH5av2(BASE_PATH + "mimolm/data")
     data_module.setup(stage="fit")
-    model = MimoLM(data_size=data_module.tensor_size_train
+    model = MimoLM.load_from_checkpoint(checkpoint_path= BASE_PATH + 'mimolm/ckpts/lightning_logs/version_2/checkpoints/epoch=9-step=2610.ckpt'
+                , data_size=data_module.tensor_size_train
                 , n_rollouts = args.n_rollouts
                 , learning_rate = args.learning_rate,)
 
@@ -44,7 +45,7 @@ def main(args):
 
     # #Run learning rate finder and then train
     # tuner.lr_find(model=model, datamodule=data_module)
-    trainer.fit(model=model, datamodule=data_module, ckpt_path=BASE_PATH + 'mimolm/ckpts/lightning_logs/version_0/checkpoints/epoch=9-step=2610.ckpt')
+    trainer.fit(model=model, datamodule=data_module)#, ckpt_path=BASE_PATH + 'mimolm/ckpts/lightning_logs/version_0/checkpoints/epoch=9-step=2610.ckpt')
     
 
 if __name__ == "__main__":
