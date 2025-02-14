@@ -201,16 +201,16 @@ class MimoLM(pl.LightningModule):
         preds = interpolate_trajectory(preds, self.sampling_step, self.device)
         minade = [0] * n_batch
         minfde = [0] * n_batch
+        
+        mode_trajectories = preds
+        # transform to global coordinate
+        trajs = torch_pos2global(mode_trajectories, batch['ref/pos'], batch["ref/rot"])
+        gt_pos = torch_pos2global(batch["gt/pos"], batch['ref/pos'], batch["ref/rot"])
+        forecasted_trajs = trajs.cpu()
+        gt_trajs = gt_pos.squeeze(0).cpu()
         for n in range(n_batch):
-            mode_trajectories = preds[n * self.n_rollouts:(n + 1) * self.n_rollouts,]
-            # transform to global coordinate
-            trajs = torch_pos2global(mode_trajectories, batch['ref/pos'][n:n+1], batch["ref/rot"][n:n+1])
-            gt_pos = torch_pos2global(batch["gt/pos"][n:n+1], batch['ref/pos'][n:n+1], batch["ref/rot"][n:n+1])
-            
-            forecasted_trajs = trajs.permute(1, 0, 2, 3).cpu()
-            gt_trajs = gt_pos.squeeze(0).cpu()
-            minade[n] = min(compute_world_ade(forecasted_trajs, gt_trajs))
-            minfde[n] = min(compute_world_fde(forecasted_trajs, gt_trajs))
+            minade[n] = min(compute_world_ade(forecasted_trajs[n:n+1].permute(1, 0, 2, 3), gt_trajs))
+            minfde[n] = min(compute_world_fde(forecasted_trajs[n:n+1].permute(1, 0, 2, 3), gt_trajs))
         
         self.log("MinADE", np.mean(minade), on_step=True, on_epoch=False, prog_bar=True, logger=True) 
         self.log("MinFDE", np.mean(minfde), on_step=True, on_epoch=False, prog_bar=True, logger=True) 
