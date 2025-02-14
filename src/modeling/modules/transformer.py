@@ -33,8 +33,7 @@ class TransformerDecoder(nn.Module):
         self.layer_norm_2 = nn.LayerNorm(normalized_shape = self.emb_dim)
         self.layer_norm_3 = nn.LayerNorm(normalized_shape = self.emb_dim)
 
-        self.ffn_1 = nn.Linear(in_features=self.emb_dim, 
-                        out_features=emb_dim)
+        self.ffn_1 = nn.Linear(in_features=self.emb_dim, out_features=emb_dim)
         
         self.dropout = nn.Dropout(self.dropout_rate)
 

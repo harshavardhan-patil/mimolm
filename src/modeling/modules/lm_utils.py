@@ -1,6 +1,7 @@
 import itertools
 import torch
 import torch.nn.functional as F
+from torch_kmeans import KMeans
 
 def create_vocabulary(max_delta, n_quantization_bins, n_verlet_steps):
     bins = torch.linspace(-max_delta, max_delta, steps=n_quantization_bins)
@@ -80,9 +81,6 @@ def interpolate_trajectory(trajectory, scale_factor, device):
     interpolated[:, :, -1] = interpolated[:, :, -2] + (interpolated[:, :, -2] - interpolated[:, :, -3]) + accl / 2.
     
     return interpolated
-
-import numpy as np
-from torch_kmeans import KMeans
 
 def non_maximum_suppression(trajectories, threshold):
     """

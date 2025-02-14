@@ -19,6 +19,13 @@ from src.external.hptr.src.data_modules.ac_global import AgentCentricGlobal
 from src.modeling.modules.lm_utils import create_vocabulary, tokenize_motion, get_attention_mask, nucleus_sampling, interpolate_trajectory, cluster_rollouts, non_maximum_suppression
 from src.external.hptr.src.utils.transform_utils import torch_pos2global
 from src.modeling.modules.transformer import TransformerDecoder
+from src.modeling.modules.av2_metrics import (
+    compute_world_ade,
+    compute_world_fde,
+    compute_world_brier_fde,
+    compute_world_misses,
+    compute_world_collisions
+)
 
 class MimoLM(pl.LightningModule):
     def __init__(
@@ -30,6 +37,8 @@ class MimoLM(pl.LightningModule):
         n_targets = 8,
         enc_dim = 128,
         dec_dim = 256,
+        n_heads = 2,
+        n_layers = 2,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -71,7 +80,7 @@ class MimoLM(pl.LightningModule):
                                                 "dropout_p" : None,})
 
         self.encoder = EarlyFusionEncoder(hidden_dim=enc_dim,
-                                    tf_cfg={"n_head": 2,
+                                    tf_cfg={"n_head": n_heads,
                                             "dropout_p": 0.1,
                                             "norm_first": True,
                                             "bias": True},
@@ -80,7 +89,7 @@ class MimoLM(pl.LightningModule):
                                                 "mode_init": "xavier", # uniform, xavier
                                                 "scale": 5.0},
                                     n_latent_query=enc_dim - 32,
-                                    n_encoder_layers=2)  
+                                    n_encoder_layers=n_layers)  
 
         self.decoder = MotionDecoder(max_delta = 8.0, #meters
                                 n_quantization_bins = 128,
@@ -93,8 +102,8 @@ class MimoLM(pl.LightningModule):
                                 time_step_end = 49,
                                 dropout_rate = 0.2,
                                 n_rollouts = self.n_rollouts,
-                                n_heads = 2,
-                                n_layers = 2,)
+                                n_heads = n_heads,
+                                n_layers = n_layers,)
         
         self.criterion = torch.nn.CrossEntropyLoss()
 
@@ -104,7 +113,7 @@ class MimoLM(pl.LightningModule):
             'params': self.encoder.parameters(),
             'params': self.decoder.parameters()}]
             , lr=self.learning_rate
-            , weight_decay=0.4)
+            , weight_decay=0.6)
         lr_scheduler = {
             "scheduler": torch.optim.lr_scheduler.StepLR(optimizer
                                                          , step_size=5
@@ -187,6 +196,73 @@ class MimoLM(pl.LightningModule):
         loss = self.criterion(preds.flatten(0, 1), actuals[:, :, ::self.sampling_step].flatten(0, 2))
         self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True, batch_size=n_batch) 
         return loss
+    
+    def test_step(self, batch, **kwargs):
+        batch = self.preprocessor(batch)
+        actuals, _ = tokenize_motion(batch["gt/pos"],
+            self.decoder.pos_bins, 
+            self.decoder.verlet_wrapper, 
+            self.decoder.n_verlet_steps)
+        n_batch, n_agents = batch["ac/target_pos"].shape[0], batch["ac/target_pos"].shape[1]
+        
+        input_dict = {
+        k.split("input/")[-1]: v for k, v in batch.items() if "input/" in k
+        }
+        valid = input_dict["target_valid"].any(-1)
+        target_emb, target_valid, other_emb, other_valid, map_emb, map_valid = self.input_projections(target_valid = input_dict["target_valid"], 
+                target_attr = input_dict["target_attr"],
+                other_valid = input_dict["other_valid"],
+                other_attr = input_dict["other_attr"],
+                map_valid = input_dict["map_valid"],
+                map_attr = input_dict["map_attr"],)
+        
+        fused_emb, fused_emb_invalid = self.encoder(
+                    target_emb, target_valid, other_emb, other_valid, map_emb, map_valid, input_dict["target_type"], valid
+                )
+        
+        batch["ac/target_pos"] = batch["ac/target_pos"].repeat_interleave(repeats=self.n_rollouts, dim=0)
+        batch["ac/target_type"] = batch["ac/target_type"].repeat_interleave(repeats=self.n_rollouts, dim=0)
+        fused_emb = fused_emb.repeat_interleave(repeats=self.n_rollouts, dim=0)
+        for _ in range(self.inference_steps):
+            last_pos = batch["ac/target_pos"][:, :, -1]
+            motion_tokens = batch["ac/target_pos"]
+            target_types = batch["ac/target_type"]
+            pred, last_token = self.decoder(motion_tokens, target_types, fused_emb, fused_emb_invalid)
+            pred = nucleus_sampling(pred[:, -1])
+            pred = self.decoder.vocabulary[pred][:, 1:].unflatten(dim=0, sizes=(n_batch * self.n_rollouts, n_agents))
+            pred = self.decoder.verlet_wrapper[pred]
+            pred = torch.clamp(last_token + pred, min=0, max=127)
+            pred = self.decoder.pos_bins[pred.long()]
+            pred = last_pos + pred
+            batch["ac/target_pos"] = torch.cat((batch["ac/target_pos"], pred.unsqueeze(2)), dim = -2)
+
+        preds = batch["ac/target_pos"][:, :, 25:, ]
+        # upsample from 5 Hz to 10 Hz
+        preds = interpolate_trajectory(preds, self.sampling_step, self.device)
+        # NMS to remove redundant rollouts
+        # filtered_rollouts = non_maximum_suppression(preds, threshold=3.0)
+        brierminfde = [0] * n_batch
+        minade = [0] * n_batch
+        minfde = [0] * n_batch
+        # KMeans to find cluster centres aka output worlds
+        for n in range(n_batch):
+            mode_trajectories, mode_probs = cluster_rollouts(preds[n * self.n_rollouts:(n + 1) * self.n_rollouts,], n_clusters=6)
+            # transform to global coordinate
+            trajs = torch_pos2global(mode_trajectories, batch['ref/pos'][n:n+1].repeat(6, 1, 1, 1), batch["ref/rot"][n:n+1].repeat(6, 1, 1, 1))
+            gt_pos = torch_pos2global(batch["gt/pos"][n:n+1], batch['ref/pos'][n:n+1], batch["ref/rot"][n:n+1])
+            
+            forecasted_trajs = trajs.permute(1, 0, 2, 3).cpu()
+            gt_trajs = gt_pos.squeeze(0).cpu()
+            mode_probs = mode_probs.cpu()
+            brierminfde[n] = min(compute_world_brier_fde(forecasted_trajs, gt_trajs, mode_probs)[:6])
+            minade[n] = min(compute_world_ade(forecasted_trajs, gt_trajs))
+            minfde[n] = min(compute_world_fde(forecasted_trajs, gt_trajs))
+        
+        self.log("BrierMinFDE", np.mean(brierminfde), on_step=True, on_epoch=True, prog_bar=True, logger=True) 
+        self.log("MinADE", np.mean(minade), on_step=True, on_epoch=True, prog_bar=True, logger=True) 
+        self.log("MinFDE", np.mean(minfde), on_step=True, on_epoch=True, prog_bar=True, logger=True) 
+        return -1
+     
 
 class InputProjections(nn.Module):
     def __init__(
@@ -404,8 +480,8 @@ class MotionDecoder(nn.Module):
             fused_emb_invalid: Tensor,
             ) -> Tuple[Tensor, Tensor]:
 
-        n_agents = motion_tokens.shape[1]
         n_batch = motion_tokens.shape[0]
+        n_agents = motion_tokens.shape[1]
         n_steps = motion_tokens.shape[2]
         time_indices = torch.arange(0, n_steps).type_as(self.time_indices_type)
 
@@ -417,14 +493,16 @@ class MotionDecoder(nn.Module):
         
         # we compute a learned value embedding and two learned positional embeddings (representing the timestep and agent identity) for each discrete motion token, which are combined via an element-wise sum prior to being input to the transformer decoder.
         val_embeddings = self.val_emb_layer(motion_tokens)
+        # todo: is repeating embeddings a good idea?!
         step_embeddings = self.step_emb_layer(time_indices
                                               ).unsqueeze(0
-                                              ).repeat(motion_tokens.shape[1], 1, 1
+                                              ).repeat(n_agents, 1, 1
                                               ).unsqueeze(0
-                                              ).repeat(motion_tokens.shape[0], 1, 1, 1)
+                                              ).repeat(n_batch, 1, 1, 1)
         type_embeddings = self.type_emb_layer(target_types.int().argmax(dim=-1)
                                               ).unsqueeze(2
                                               ).repeat(1, 1, n_steps, 1)
+        
         # [n_batch, n_agents * n_time_steps, emb_dim]
         motion_embeddings = (val_embeddings + 
                              step_embeddings + 
