@@ -212,8 +212,8 @@ class MimoLM(pl.LightningModule):
             minade[n] = min(compute_world_ade(forecasted_trajs[n:n+1].permute(1, 0, 2, 3), gt_trajs))
             minfde[n] = min(compute_world_fde(forecasted_trajs[n:n+1].permute(1, 0, 2, 3), gt_trajs))
         
-        self.log("MinADE", np.mean(minade), on_step=True, on_epoch=False, prog_bar=True, logger=True) 
-        self.log("MinFDE", np.mean(minfde), on_step=True, on_epoch=False, prog_bar=True, logger=True) 
+        self.log("MinADE", np.mean(minade), on_step=True, on_epoch=True, prog_bar=True, logger=True) 
+        self.log("MinFDE", np.mean(minfde), on_step=True, on_epoch=True, prog_bar=True, logger=True) 
         return loss
     
     def test_step(self, batch, **kwargs):
