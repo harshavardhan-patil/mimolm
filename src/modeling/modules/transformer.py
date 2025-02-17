@@ -40,15 +40,18 @@ class TransformerDecoder(nn.Module):
     def forward(self,
                 query,
                 key,
-                n_agents,
                 attn_mask,
+                key_padding_mask,
+                fused_emb_invalid,
+                n_agents,
                 n_steps,
                 ):
 
         attn_out_1, _ = self.self_attn(query = query, 
                                         key = query, 
                                         value = query, 
-                                        attn_mask = attn_mask)
+                                        attn_mask = attn_mask,
+                                        key_padding_mask = key_padding_mask)
         #[n_rollouts * n_batch * n_agents, n_time_steps, emb_dim]
         attn_out_2 = self.layer_norm_1(query + attn_out_1
                                          ).unflatten(dim=1, sizes=(n_agents, n_steps)
@@ -59,7 +62,8 @@ class TransformerDecoder(nn.Module):
         # cross attend each motion token to corresponding scene embeddings,
         attn_out_3, _ = self.cross_attn(query = attn_out_2, 
                                         key = key, 
-                                        value = value, )
+                                        value = value, 
+                                        key_padding_mask = fused_emb_invalid)
         attn_out_4 = self.layer_norm_2(attn_out_2 + attn_out_3)
         #feed-forward
         ffn_out_1 = F.gelu(self.ffn_1(attn_out_4))
