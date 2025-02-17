@@ -35,10 +35,10 @@ class MimoLM(pl.LightningModule):
         learning_rate,
         sampling_rate = 5,
         n_targets = 8,
-        enc_dim = 128, #192
+        enc_dim = 192, #192
         dec_dim = 256,
-        n_heads = 2,
-        n_layers = 2,
+        n_heads = 4,
+        n_layers = 4,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -151,15 +151,7 @@ class MimoLM(pl.LightningModule):
         fused_emb, fused_emb_invalid = self.encoder(
                     target_emb, target_valid, other_emb, other_valid, map_emb, map_valid, input_dict["target_type"], valid
                 )
-        valid_agent_mask = motion_tokens.any(dim=-2).any(dim=-1) # Shape: [batch_size, n_agents]
-        motion_tokens = motion_tokens[valid_agent_mask]
-        motion_tokens = motion_tokens.unsqueeze(0) if motion_tokens.dim != 4 else motion_tokens
-        valid_mask = torch.cat([batch['input/target_valid'], batch['gt/valid'][:, :, ::self.sampling_step,]], dim=-1)[valid_agent_mask]
-        valid_mask = valid_mask.unsqueeze(0)  if valid_mask.dim != 3 else valid_mask
-        target_types = target_types[valid_agent_mask]
-        target_types = target_types.unsqueeze(0) if target_types.dim != 3 else target_types
-        fused_emb = fused_emb[valid_agent_mask.flatten(0, 1)]
-        fused_emb_invalid = fused_emb_invalid[valid_agent_mask.flatten(0, 1)]
+        valid_mask = torch.cat([batch['input/target_valid'], batch['gt/valid'][:, :, ::self.sampling_step,]], dim=-1)
         pred, _ = self.decoder(motion_tokens
                                , target_types
                                , valid_mask
@@ -167,9 +159,6 @@ class MimoLM(pl.LightningModule):
                                , fused_emb_invalid)
         
         pred = pred[:, self.inference_start - 1: -1, :]
-        actuals = actuals[valid_agent_mask]
-        if actuals.dim != 3:
-            actuals = actuals.unsqueeze(0)
         loss = self.criterion(pred.flatten(0, 1), actuals[:, :, ::self.sampling_step].flatten(0, 2))
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True, batch_size=n_batch)
         return loss
@@ -199,15 +188,7 @@ class MimoLM(pl.LightningModule):
                 )
         
         preds = []
-        valid_agent_mask = batch["ac/target_pos"].any(dim=-2).any(dim=-1)
-        batch["ac/target_pos"] = batch["ac/target_pos"][valid_agent_mask]
-        batch["ac/target_pos"] = batch["ac/target_pos"].unsqueeze(0) if batch["ac/target_pos"].dim != 4 else batch["ac/target_pos"]
-        valid_mask = batch['input/target_valid'][valid_agent_mask]
-        valid_mask = valid_mask.unsqueeze(0) if valid_mask.dim != 3 else valid_mask
-        batch["ac/target_type"] = batch["ac/target_type"][valid_agent_mask]
-        batch["ac/target_type"] = batch["ac/target_type"].unsqueeze(0) if batch["ac/target_type"].dim != 3 else batch["ac/target_type"]
-        fused_emb = fused_emb[valid_agent_mask.flatten(0, 1)]
-        fused_emb_invalid = fused_emb_invalid[valid_agent_mask.flatten(0, 1)]
+        valid_mask = batch['input/target_valid']
         n_batch, n_agents = batch["ac/target_pos"].shape[0], batch["ac/target_pos"].shape[1]
         for _ in range(self.inference_steps):
             last_pos = batch["ac/target_pos"][:, :, -1]
@@ -228,8 +209,6 @@ class MimoLM(pl.LightningModule):
             batch["ac/target_pos"] = torch.cat((batch["ac/target_pos"], pred.unsqueeze(2)), dim = -2)
 
         preds = torch.cat(preds, dim=1)
-        actuals = actuals[valid_agent_mask]
-        actuals = actuals.unsqueeze(0) if actuals.dim != 3 else actuals
         loss = self.criterion(preds.flatten(0, 1), actuals[:, :, ::self.sampling_step].flatten(0, 2))
         self.log("val_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True, batch_size=n_batch) 
 
@@ -241,12 +220,9 @@ class MimoLM(pl.LightningModule):
         
         mode_trajectories = preds
         # transform to global coordinate
-        batch['gt/valid'] = batch['gt/valid'][valid_agent_mask]
-        batch['gt/valid'] = batch['gt/valid'].unsqueeze(0) if batch['gt/valid'].dim != 3 else batch['gt/valid']
-        trajs = torch_pos2global(mode_trajectories, batch['ref/pos'][valid_agent_mask], batch["ref/rot"][valid_agent_mask])
+        trajs = torch_pos2global(mode_trajectories, batch['ref/pos'], batch["ref/rot"])
         trajs[~batch['gt/valid']] = 0.0
-        gt_pos = torch_pos2global(batch["gt/pos"][valid_agent_mask], batch['ref/pos'][valid_agent_mask], batch["ref/rot"][valid_agent_mask])
-        gt_pos = gt_pos.unsqueeze(0) if gt_pos.dim != 4 else gt_pos
+        gt_pos = torch_pos2global(batch["gt/pos"], batch['ref/pos'], batch["ref/rot"])
         gt_pos[~batch['gt/valid']] = 0.0
         forecasted_trajs = trajs.cpu()
         gt_trajs = gt_pos.squeeze(0).cpu()
@@ -473,12 +449,12 @@ class MotionDecoder(nn.Module):
             enc_dim: int,
             dropout_rate: int,
             n_rollouts: int,
-            n_quantization_bins: int = 128,
-            n_verlet_steps: int = 13,
-            n_time_steps: int = 110,
-            time_step_end: int = 49,
-            n_heads: int = 2,
-            n_layers: int = 1,
+            n_heads: int,
+            n_layers: int,
+            n_quantization_bins: int,
+            n_verlet_steps: int,
+            n_time_steps: int,
+            time_step_end: int,
             ) -> None:
         super().__init__()
 
@@ -584,6 +560,10 @@ class MotionDecoder(nn.Module):
         # ensure scene embedding matches decoder dimension
         fused_emb = self.scene_emb_layers(fused_emb)
         key = fused_emb
+        # setting empty agents as valid for preventing NaNs
+        invalid_agents = fused_emb_invalid.all(dim=-1)
+        cross_attn_mask = fused_emb_invalid.clone()
+        cross_attn_mask[invalid_agents, ] = False
         # MotionLM repeats embeddings across rollouts before cross-attention only, here we repeat for both self and cross attention
         for decoder_block in self.decoder_layers:
             if query.shape[0] != n_batch :
@@ -593,7 +573,8 @@ class MotionDecoder(nn.Module):
                                   key = key, 
                                   attn_mask = attn_mask,
                                   key_padding_mask = key_padding_mask,
-                                  fused_emb_invalid = fused_emb_invalid,
+                                  cross_attn_mask = cross_attn_mask,
+                                  invalid_agents = invalid_agents,
                                   n_agents = n_agents,
                                   n_steps = n_steps)
             

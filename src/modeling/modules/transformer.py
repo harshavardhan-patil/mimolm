@@ -42,11 +42,11 @@ class TransformerDecoder(nn.Module):
                 key,
                 attn_mask,
                 key_padding_mask,
-                fused_emb_invalid,
+                cross_attn_mask,
+                invalid_agents,
                 n_agents,
                 n_steps,
                 ):
-
         attn_out_1, _ = self.self_attn(query = query, 
                                         key = query, 
                                         value = query, 
@@ -56,15 +56,17 @@ class TransformerDecoder(nn.Module):
         attn_out_2 = self.layer_norm_1(query + attn_out_1
                                          ).unflatten(dim=1, sizes=(n_agents, n_steps)
                                          ).flatten(0, 1) 
-        
         #[n_rollouts * n_batch * n_agents, : , emb_dim]
         value = key
         # cross attend each motion token to corresponding scene embeddings,
         attn_out_3, _ = self.cross_attn(query = attn_out_2, 
                                         key = key, 
                                         value = value, 
-                                        key_padding_mask = fused_emb_invalid)
+                                        key_padding_mask = cross_attn_mask)
+
+        attn_out_3[invalid_agents,] = 0.0
         attn_out_4 = self.layer_norm_2(attn_out_2 + attn_out_3)
+        #attn_out_4 = self.layer_norm_2(attn_out_2 + torch.nan_to_num(attn_out_3, nan=0.0)) # to handle invalid agents
         #feed-forward
         ffn_out_1 = F.gelu(self.ffn_1(attn_out_4))
         out = self.layer_norm_3(self.dropout(ffn_out_1 + attn_out_4))
