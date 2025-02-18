@@ -33,7 +33,7 @@ class MimoLM(pl.LightningModule):
         data_size,
         n_rollouts,
         learning_rate,
-        sampling_rate = 5,
+        sampling_rate = 2,
         n_targets = 8,
         enc_dim = 192, #192
         dec_dim = 256,
@@ -91,8 +91,8 @@ class MimoLM(pl.LightningModule):
                                     n_latent_query=enc_dim - 32,
                                     n_encoder_layers=n_layers)  
 
-        self.decoder = MotionDecoder(max_delta = 8.0, #meters
-                                n_quantization_bins = 128,
+        self.decoder = MotionDecoder(max_delta = 18.0, #meters
+                                n_quantization_bins = 192,
                                 n_verlet_steps = 13,
                                 emb_dim = dec_dim,
                                 enc_dim = enc_dim,
@@ -201,9 +201,8 @@ class MimoLM(pl.LightningModule):
                                             , fused_emb_invalid)
             preds.append(pred[:, -1].unsqueeze(1))
             pred = F.softmax(pred[:, -1], dim=-1).argmax(dim=1)
-            pred = self.decoder.vocabulary[pred][:, 1:].unflatten(dim=0, sizes=(n_batch, n_agents))
-            pred = self.decoder.verlet_wrapper[pred.int()]
-            pred = torch.clamp(last_token + pred, min=0, max=127)
+            pred = self.decoder.vocabulary[pred][:, :].unflatten(dim=0, sizes=(n_batch, n_agents))
+            pred = torch.clamp(last_token + pred, min=0, max=191)
             pred = self.decoder.pos_bins[pred.long()]
             pred = last_pos + pred
             batch["ac/target_pos"] = torch.cat((batch["ac/target_pos"], pred.unsqueeze(2)), dim = -2)
@@ -212,7 +211,7 @@ class MimoLM(pl.LightningModule):
         loss = self.criterion(preds.flatten(0, 1), actuals[:, :, ::self.sampling_step].flatten(0, 2))
         self.log("val_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True, batch_size=n_batch) 
 
-        preds = batch["ac/target_pos"][:, :, 25:, ]
+        preds = batch["ac/target_pos"][:, :, self.decoder.step_current:, ]
         # upsample from 5 Hz to 10 Hz
         preds = interpolate_trajectory(preds, self.sampling_step, self.device)
         minade = [0] * n_batch
@@ -471,9 +470,7 @@ class MotionDecoder(nn.Module):
         self.n_rollouts = n_rollouts
         self.n_heads = n_heads
 
-        vocabulary, pos_bins, verlet_wrapper = create_vocabulary(self.max_delta, 
-                                                                self.n_quantization_bins, 
-                                                                self.n_verlet_steps)
+        vocabulary, pos_bins, verlet_wrapper = create_vocabulary(self.n_verlet_steps)
         self.register_buffer("mask_token", torch.tensor(n_verlet_steps ** 2))
         self.register_buffer("vocabulary", vocabulary)
         self.register_buffer("pos_bins", pos_bins)

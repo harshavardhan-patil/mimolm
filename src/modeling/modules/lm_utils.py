@@ -3,52 +3,24 @@ import torch
 import torch.nn.functional as F
 from torch_kmeans import KMeans
 
-# generated as quantiles of diff over the trainset (5Hz, 8.0m, 128 bins)
-POS_BINS = [-7.99986982e+00, -4.80515516e-01, -2.90285110e-01, -2.07447052e-01,
-       -1.59583569e-01, -1.27577724e-01, -1.04294774e-01, -8.67421402e-02,
-       -7.30916895e-02, -6.22835159e-02, -5.35616875e-02, -4.64320183e-02,
-       -4.05269618e-02, -3.55925560e-02, -3.14068198e-02, -2.78291702e-02,
-       -2.47572687e-02, -2.20771438e-02, -1.97351646e-02, -1.76718980e-02,
-       -1.58494115e-02, -1.42278671e-02, -1.27836357e-02, -1.14975572e-02,
-       -1.03395581e-02, -9.29996371e-03, -8.36381689e-03, -7.51924515e-03,
-       -6.75643329e-03, -6.05793297e-03, -5.42628765e-03, -4.85761165e-03,
-       -4.33536619e-03, -3.85799213e-03, -3.41749191e-03, -3.01334262e-03,
-       -2.64929608e-03, -2.31454521e-03, -1.99968368e-03, -1.72257423e-03,
-       -1.46495062e-03, -1.22833711e-03, -1.01258140e-03, -8.32785008e-04,
-       -6.54524192e-04, -4.97348440e-04, -3.70107591e-04, -2.43315590e-04,
-       -1.31397753e-04, -4.13954258e-05,  5.31226397e-06,  8.01086426e-05,
-        1.87076628e-04,  3.04222107e-04,  4.44378471e-04,  5.76049089e-04,
-        7.46726990e-04,  9.39562917e-04,  1.13264285e-03,  1.36695057e-03,
-        1.61322951e-03,  1.89649314e-03,  2.19231565e-03,  2.52063614e-03,
-        2.88917124e-03,  3.28008792e-03,  3.71067226e-03,  4.17984853e-03,
-        4.69755940e-03,  5.26269712e-03,  5.87858405e-03,  6.56014672e-03,
-        7.30907917e-03,  8.13221931e-03,  9.04385212e-03,  1.00538624e-02,
-        1.11795549e-02,  1.24282837e-02,  1.38215423e-02,  1.53844066e-02,
-        1.71356201e-02,  1.91088915e-02,  2.13436857e-02,  2.38749981e-02,
-        2.67695154e-02,  3.01017761e-02,  3.39735746e-02,  3.85200977e-02,
-        4.38975613e-02,  5.03389764e-02,  5.81321716e-02,  6.76279068e-02,
-        7.92440176e-02,  9.34823545e-02,  1.10866308e-01,  1.32049561e-01,
-        1.57212257e-01,  1.85974430e-01,  2.16883183e-01,  2.47898817e-01,
-        2.79182177e-01,  3.15620422e-01,  3.68264713e-01,  4.39561844e-01,
-        5.20139694e-01,  6.09279673e-01,  7.03842163e-01,  8.02555725e-01,
-        9.02770581e-01,  1.00376892e+00,  1.10529518e+00,  1.20780325e+00,
-        1.30911268e+00,  1.41200435e+00,  1.51671028e+00,  1.62149048e+00,
-        1.72696686e+00,  1.83071518e+00,  1.93999265e+00,  2.05144119e+00,
-        2.16033173e+00,  2.25523979e+00,  2.39767838e+00,  2.55966759e+00,
-        2.72384644e+00,  2.97303963e+00,  3.27389012e+00,  7.99988794e+00]
-
-def create_vocabulary(max_delta, n_quantization_bins, n_verlet_steps):
-    bins = torch.tensor(POS_BINS)
-    verlet_wrapper = torch.linspace(-n_verlet_steps // 2 + 1, n_verlet_steps // 2, steps=n_verlet_steps)
-
-    cartesian_product = list(itertools.product(torch.arange(n_verlet_steps), torch.arange(n_verlet_steps)))
-    vocabulary = [[] for _ in range(n_verlet_steps ** 2)] 
-    k = 0
-    for i, j in cartesian_product:
-        vocabulary[k] = [i * n_verlet_steps + j, i, j]
-        k+=1
-    vocabulary.append([n_verlet_steps ** 2, float('-inf'), float('-inf')]) # masking token
-    return torch.tensor(vocabulary), bins, verlet_wrapper
+def create_vocabulary(n_verlet_steps):
+    # bins set for 2Hz, 18.0m, 192bins
+    central_bins = torch.linspace(-0.1, 0.1, 41)
+    medium_pos = torch.linspace(0.1, 3.0, 46)
+    medium_neg = torch.linspace(-3.0, -0.1, 26)
+    tail_pos = torch.linspace(3.0, 18.0, 52)
+    tail_neg = torch.linspace(-18.0, -3.0, 31)
+    bins = torch.unique(torch.cat([
+        tail_neg,
+        medium_neg,
+        central_bins,
+        medium_pos,
+        tail_pos
+    ]))
+    verlet_wrapper = torch.tensor([-16, -8, -4, -2, -1,  0,  1,  2,  4,  8,  24,  36,  48])
+    cartesian_product = torch.tensor(list(itertools.product(verlet_wrapper, verlet_wrapper)))
+    vocabulary = torch.cat((cartesian_product, torch.tensor([float('-inf'), float('-inf')]).unsqueeze(0)), dim=0) # masking token
+    return vocabulary, bins, verlet_wrapper
 
 
 def tokenize_motion(motion_tokens, pos_bins, verlet_wrapper, n_verlet_steps, max_delta):
