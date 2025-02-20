@@ -127,12 +127,12 @@ class MimoLM(pl.LightningModule):
     def training_step(self, batch, **kwargs):
         with torch.no_grad():
             batch = self.preprocessor(batch)
-            actuals, _ = tokenize_motion(batch["gt/pos"],
+            actuals, _ = tokenize_motion(batch["gt/pos"][:, :, ::self.sampling_step],
                                 self.decoder.pos_bins, 
                                 self.decoder.verlet_wrapper, 
                                 self.decoder.n_verlet_steps,
                                 self.decoder.max_delta)
-            actuals[~batch['gt/valid']] = self.decoder.mask_token
+            actuals[~batch['gt/valid'][:, :, ::self.sampling_step]] = self.decoder.mask_token
             n_batch = batch["ac/target_pos"].shape[0]
             
         motion_tokens = torch.cat((batch["ac/target_pos"], batch["gt/pos"][:, :, ::self.sampling_step,]), dim = -2)
@@ -165,12 +165,12 @@ class MimoLM(pl.LightningModule):
     
     def validation_step(self, batch, **kwargs):
         batch = self.preprocessor(batch)
-        actuals, _ = tokenize_motion(batch["gt/pos"],
+        actuals, _ = tokenize_motion(batch["gt/pos"][:, :, ::self.sampling_step],
             self.decoder.pos_bins, 
             self.decoder.verlet_wrapper, 
             self.decoder.n_verlet_steps,
             self.decoder.max_delta)
-        actuals[~batch['gt/valid']] = self.decoder.mask_token
+        actuals[~batch['gt/valid'][:, :, ::self.sampling_step]] = self.decoder.mask_token
         input_dict = {
         k.split("input/")[-1]: v for k, v in batch.items() if "input/" in k
         }
@@ -226,8 +226,8 @@ class MimoLM(pl.LightningModule):
         forecasted_trajs = trajs.cpu()
         gt_trajs = gt_pos.squeeze(0).cpu()
         for n in range(n_batch):
-            minade[n] = min(compute_world_ade(forecasted_trajs[n:n+1].permute(1, 0, 2, 3), gt_trajs))
-            minfde[n] = min(compute_world_fde(forecasted_trajs[n:n+1].permute(1, 0, 2, 3), gt_trajs))
+            minade[n] = min(compute_world_ade(forecasted_trajs[n:n+1].permute(1, 0, 2, 3), gt_trajs[n]))
+            minfde[n] = min(compute_world_fde(forecasted_trajs[n:n+1].permute(1, 0, 2, 3), gt_trajs[n]))
         
         self.log("MinADE", np.mean(minade), on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True, batch_size=n_batch) 
         self.log("MinFDE", np.mean(minfde), on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True, batch_size=n_batch) 
@@ -235,68 +235,55 @@ class MimoLM(pl.LightningModule):
     
     def test_step(self, batch, **kwargs):
         batch = self.preprocessor(batch)
-        actuals, _ = tokenize_motion(batch["gt/pos"],
+        whole, _ = tokenize_motion(torch.cat([batch['ac/target_pos'], batch["gt/pos"][:, :, ::self.sampling_step]], dim=-2),
             self.decoder.pos_bins, 
             self.decoder.verlet_wrapper, 
-            self.decoder.n_verlet_steps)
+            self.decoder.n_verlet_steps,
+            self.decoder.max_delta)
+        actuals = whole[:, :, self.decoder.step_current:]
         n_batch, n_agents = batch["ac/target_pos"].shape[0], batch["ac/target_pos"].shape[1]
-        
-        input_dict = {
-        k.split("input/")[-1]: v for k, v in batch.items() if "input/" in k
-        }
-        valid = input_dict["target_valid"].any(-1)
-        target_emb, target_valid, other_emb, other_valid, map_emb, map_valid = self.input_projections(target_valid = input_dict["target_valid"], 
-                target_attr = input_dict["target_attr"],
-                other_valid = input_dict["other_valid"],
-                other_attr = input_dict["other_attr"],
-                map_valid = input_dict["map_valid"],
-                map_attr = input_dict["map_attr"],)
-        
-        fused_emb, fused_emb_invalid = self.encoder(
-                    target_emb, target_valid, other_emb, other_valid, map_emb, map_valid, input_dict["target_type"], valid
-                )
-        
-        batch["ac/target_pos"] = batch["ac/target_pos"].repeat_interleave(repeats=self.n_rollouts, dim=0)
-        batch["ac/target_type"] = batch["ac/target_type"].repeat_interleave(repeats=self.n_rollouts, dim=0)
-        fused_emb = fused_emb.repeat_interleave(repeats=self.n_rollouts, dim=0)
-        for _ in range(self.inference_steps):
+        #print(f"actuals shape: {actuals.shape}")
+        for i in range(self.inference_steps):
             last_pos = batch["ac/target_pos"][:, :, -1]
             motion_tokens = batch["ac/target_pos"]
             target_types = batch["ac/target_type"]
-            pred, last_token = self.decoder(motion_tokens, target_types, fused_emb, fused_emb_invalid)
-            pred = nucleus_sampling(pred[:, -1])
-            pred = self.decoder.vocabulary[pred][:, 1:].unflatten(dim=0, sizes=(n_batch * self.n_rollouts, n_agents))
-            pred = self.decoder.verlet_wrapper[pred]
-            pred = torch.clamp(last_token + pred, min=0, max=127)
+            _, last_bin = tokenize_motion(motion_tokens, # [n_batch, n_agents, n_time_steps, 1]
+                                        self.decoder.pos_bins, 
+                                        self.decoder.verlet_wrapper, 
+                                        self.decoder.n_verlet_steps,
+                                        self.decoder.max_delta)
+
+            #print(f"last_bin shape: {last_bin.shape}")
+            pred = self.decoder.vocabulary[actuals[:, :, i]]#.unflatten(dim=0, sizes=(n_batch, n_agents))
+            pred = torch.clamp(last_bin + pred, min=0, max=191)
             pred = self.decoder.pos_bins[pred.long()]
             pred = last_pos + pred
             batch["ac/target_pos"] = torch.cat((batch["ac/target_pos"], pred.unsqueeze(2)), dim = -2)
 
-        preds = batch["ac/target_pos"][:, :, 25:, ]
+        preds = batch["ac/target_pos"][:, :, self.decoder.step_current:, ]
+        #print(f"preds: {preds[0][0]}")
+        #print(f"gt : {batch["gt/pos"][:, :, ::self.sampling_step][0][0]}")
         # upsample from 5 Hz to 10 Hz
-        preds = interpolate_trajectory(preds, self.sampling_step, self.device)
-        # NMS to remove redundant rollouts
-        # filtered_rollouts = non_maximum_suppression(preds, threshold=3.0)
-        brierminfde = [0] * n_batch
+        preds = F.interpolate(input=preds, size=(60, 2))#interpolate_trajectory(preds, self.sampling_step, self.device)
         minade = [0] * n_batch
         minfde = [0] * n_batch
-        # KMeans to find cluster centres aka output worlds
-        for n in range(n_batch):
-            mode_trajectories, mode_probs = cluster_rollouts(preds[n * self.n_rollouts:(n + 1) * self.n_rollouts,], n_clusters=6)
-            # transform to global coordinate
-            trajs = torch_pos2global(mode_trajectories, batch['ref/pos'][n:n+1].repeat(6, 1, 1, 1), batch["ref/rot"][n:n+1].repeat(6, 1, 1, 1))
-            gt_pos = torch_pos2global(batch["gt/pos"][n:n+1], batch['ref/pos'][n:n+1], batch["ref/rot"][n:n+1])
-            
-            forecasted_trajs = trajs.permute(1, 0, 2, 3).cpu()
-            gt_trajs = gt_pos.squeeze(0).cpu()
-            mode_probs = mode_probs.cpu()
-            brierminfde[n] = min(compute_world_brier_fde(forecasted_trajs, gt_trajs, mode_probs)[:6])
-            minade[n] = min(compute_world_ade(forecasted_trajs, gt_trajs))
-            minfde[n] = min(compute_world_fde(forecasted_trajs, gt_trajs))
         
-        self.log("BrierMinFDE", np.mean(brierminfde), on_step=True, on_epoch=True, prog_bar=True, logger=True) 
-        self.log("MinADE", np.mean(minade), on_step=True, on_epoch=True, prog_bar=True, logger=True) 
-        self.log("MinFDE", np.mean(minfde), on_step=True, on_epoch=True, prog_bar=True, logger=True) 
+        mode_trajectories = preds
+        # transform to global coordinate
+        trajs = torch_pos2global(mode_trajectories, batch['ref/pos'], batch["ref/rot"])
+        trajs[~batch['gt/valid']] = 0.0
+        gt_pos = torch_pos2global(batch["gt/pos"], batch['ref/pos'], batch["ref/rot"])
+        gt_pos[~batch['gt/valid']] = 0.0
+        forecasted_trajs = trajs.cpu()
+        gt_trajs = gt_pos.squeeze(0).cpu()
+        #print(f"forecast: {forecasted_trajs[0][0]}")
+        #print(f"gt trajs: {gt_trajs[0][0]}")
+        for n in range(n_batch):
+            minade[n] = min(compute_world_ade(forecasted_trajs[n:n+1].permute(1, 0, 2, 3), gt_trajs[n]))
+            minfde[n] = min(compute_world_fde(forecasted_trajs[n:n+1].permute(1, 0, 2, 3), gt_trajs[n]))
+        
+        self.log("MinADE", np.mean(minade), on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True, batch_size=n_batch) 
+        self.log("MinFDE", np.mean(minfde), on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True, batch_size=n_batch) 
         return -1
      
 
@@ -522,7 +509,7 @@ class MotionDecoder(nn.Module):
         time_indices = torch.arange(0, n_steps).type_as(self.time_indices_type)
 
         # quantized, discretized, verlet-wrapped motion tokens
-        motion_tokens, last_token = tokenize_motion(motion_tokens, # [n_batch, n_agents, n_time_steps, 1]
+        motion_tokens, last_bin = tokenize_motion(motion_tokens, # [n_batch, n_agents, n_time_steps, 1]
                                         self.pos_bins, 
                                         self.verlet_wrapper, 
                                         self.n_verlet_steps,
@@ -577,4 +564,4 @@ class MotionDecoder(nn.Module):
             
         out = self.fully_connected_layers(query)
         out[:, :, self.mask_token] = float('-inf')
-        return out, last_token
+        return out, last_bin
