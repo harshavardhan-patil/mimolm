@@ -98,8 +98,9 @@ def interpolate_trajectory(trajectory, scale_factor, device):
         interpolated[:, :, interp_idx] = interpolated_points
     
     # Add final point by extrapolating from last two points using verlet
-    accl = (interpolated[:, :, -2] - interpolated[:, :, -3]) - (interpolated[:, :, -3] - interpolated[:, :, -4])
-    interpolated[:, :, -1] = interpolated[:, :, -2] + (interpolated[:, :, -2] - interpolated[:, :, -3]) + accl / 2.
+    for i in range(60 - scale_factor, 60):
+        accl = (interpolated[:, :, i-1] - interpolated[:, :, i-2]) - (interpolated[:, :, i-2] - interpolated[:, :, i-3])
+        interpolated[:, :, i] = interpolated[:, :, i-1] + (interpolated[:, :, i-1] - interpolated[:, :, i-2]) + accl / 2.
     
     return interpolated
 

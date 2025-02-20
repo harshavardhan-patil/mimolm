@@ -127,15 +127,16 @@ class MimoLM(pl.LightningModule):
     def training_step(self, batch, **kwargs):
         with torch.no_grad():
             batch = self.preprocessor(batch)
-            actuals, _ = tokenize_motion(batch["gt/pos"][:, :, ::self.sampling_step],
+            motion_tokens = torch.cat((batch["ac/target_pos"], batch["gt/pos"][:, :, ::self.sampling_step,]), dim = -2)
+            actuals, _ = tokenize_motion(motion_tokens,
                                 self.decoder.pos_bins, 
                                 self.decoder.verlet_wrapper, 
                                 self.decoder.n_verlet_steps,
                                 self.decoder.max_delta)
+            actuals = actuals[:, :, self.decoder.step_current:]
             actuals[~batch['gt/valid'][:, :, ::self.sampling_step]] = self.decoder.mask_token
             n_batch = batch["ac/target_pos"].shape[0]
             
-        motion_tokens = torch.cat((batch["ac/target_pos"], batch["gt/pos"][:, :, ::self.sampling_step,]), dim = -2)
         target_types = batch["ac/target_type"]
         input_dict = {
         k.split("input/")[-1]: v for k, v in batch.items() if "input/" in k
@@ -159,17 +160,19 @@ class MimoLM(pl.LightningModule):
                                , fused_emb_invalid)
         
         pred = pred[:, self.inference_start - 1: -1, :]
-        loss = self.criterion(pred.flatten(0, 1), actuals[:, :, ::self.sampling_step].flatten(0, 2))
+        loss = self.criterion(pred.flatten(0, 1), actuals.flatten(0, 2))
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True, batch_size=n_batch)
         return loss
     
     def validation_step(self, batch, **kwargs):
         batch = self.preprocessor(batch)
-        actuals, _ = tokenize_motion(batch["gt/pos"][:, :, ::self.sampling_step],
+        motion_tokens = torch.cat((batch["ac/target_pos"], batch["gt/pos"][:, :, ::self.sampling_step,]), dim = -2)
+        actuals, _ = tokenize_motion(motion_tokens,
             self.decoder.pos_bins, 
             self.decoder.verlet_wrapper, 
             self.decoder.n_verlet_steps,
             self.decoder.max_delta)
+        actuals = actuals[:, :, self.decoder.step_current:]
         actuals[~batch['gt/valid'][:, :, ::self.sampling_step]] = self.decoder.mask_token
         input_dict = {
         k.split("input/")[-1]: v for k, v in batch.items() if "input/" in k
@@ -208,12 +211,12 @@ class MimoLM(pl.LightningModule):
             batch["ac/target_pos"] = torch.cat((batch["ac/target_pos"], pred.unsqueeze(2)), dim = -2)
 
         preds = torch.cat(preds, dim=1)
-        loss = self.criterion(preds.flatten(0, 1), actuals[:, :, ::self.sampling_step].flatten(0, 2))
+        loss = self.criterion(preds.flatten(0, 1), actuals.flatten(0, 2))
         self.log("val_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True, batch_size=n_batch) 
 
         preds = batch["ac/target_pos"][:, :, self.decoder.step_current:, ]
         # upsample from 5 Hz to 10 Hz
-        preds = interpolate_trajectory(preds, self.sampling_step, self.device)
+        preds = F.interpolate(input=preds, size=(60, 2))#interpolate_trajectory(preds, self.sampling_step, self.device)
         minade = [0] * n_batch
         minfde = [0] * n_batch
         
@@ -224,7 +227,7 @@ class MimoLM(pl.LightningModule):
         gt_pos = torch_pos2global(batch["gt/pos"], batch['ref/pos'], batch["ref/rot"])
         gt_pos[~batch['gt/valid']] = 0.0
         forecasted_trajs = trajs.cpu()
-        gt_trajs = gt_pos.squeeze(0).cpu()
+        gt_trajs = gt_pos.cpu()
         for n in range(n_batch):
             minade[n] = min(compute_world_ade(forecasted_trajs[n:n+1].permute(1, 0, 2, 3), gt_trajs[n]))
             minfde[n] = min(compute_world_fde(forecasted_trajs[n:n+1].permute(1, 0, 2, 3), gt_trajs[n]))
