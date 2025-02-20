@@ -261,8 +261,8 @@ class MimoLM(pl.LightningModule):
             batch["ac/target_pos"] = torch.cat((batch["ac/target_pos"], pred.unsqueeze(2)), dim = -2)
 
         preds = batch["ac/target_pos"][:, :, self.decoder.step_current:, ]
-        #print(f"preds: {preds[0][0]}")
-        #print(f"gt : {batch["gt/pos"][:, :, ::self.sampling_step][0][0]}")
+        # print(f"preds: {preds[0][0]}")
+        # print(f"gt : {batch["gt/pos"][:, :, ::self.sampling_step][0][0]}")
         # upsample from 5 Hz to 10 Hz
         preds = F.interpolate(input=preds, size=(60, 2))#interpolate_trajectory(preds, self.sampling_step, self.device)
         minade = [0] * n_batch
@@ -275,7 +275,7 @@ class MimoLM(pl.LightningModule):
         gt_pos = torch_pos2global(batch["gt/pos"], batch['ref/pos'], batch["ref/rot"])
         gt_pos[~batch['gt/valid']] = 0.0
         forecasted_trajs = trajs.cpu()
-        gt_trajs = gt_pos.squeeze(0).cpu()
+        gt_trajs = gt_pos.cpu()
         #print(f"forecast: {forecasted_trajs[0][0]}")
         #print(f"gt trajs: {gt_trajs[0][0]}")
         for n in range(n_batch):
