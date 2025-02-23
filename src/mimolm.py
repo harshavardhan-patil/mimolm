@@ -16,7 +16,7 @@ from src.external.hptr.src.models.modules.multi_modal import MultiModalAnchors
 from src.external.hptr.src.data_modules.agent_centric import AgentCentricPreProcessing
 from src.external.hptr.src.data_modules.ac_global import AgentCentricGlobal
 
-from src.modeling.modules.lm_utils import create_vocabulary, tokenize_motion, get_attention_mask, nucleus_sampling, interpolate_trajectory, cluster_rollouts, non_maximum_suppression
+from src.modeling.modules.lm_utils import create_vocabulary, tokenize_motion, get_attention_mask, nucleus_sampling, interpolate_trajectory, cluster_rollouts, non_maximum_suppression, scalar_to_delta
 from src.external.hptr.src.utils.transform_utils import torch_pos2global
 from src.modeling.modules.transformer import TransformerDecoder
 from src.modeling.modules.av2_metrics import (
@@ -37,8 +37,8 @@ class MimoLM(pl.LightningModule):
         n_targets = 8,
         enc_dim = 192, #192
         dec_dim = 256,
-        n_heads = 2,
-        n_layers = 2,
+        n_heads = 4,
+        n_layers = 4,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -93,7 +93,7 @@ class MimoLM(pl.LightningModule):
 
         self.decoder = MotionDecoder(max_delta = 18.0, #meters
                                 n_quantization_bins = 192,
-                                n_verlet_steps = 13,
+                                vocab_size = 256 + 2,
                                 emb_dim = dec_dim,
                                 enc_dim = enc_dim,
                                 sampling_rate = self.sampling_rate,
@@ -105,12 +105,10 @@ class MimoLM(pl.LightningModule):
                                 n_heads = n_heads,
                                 n_layers = n_layers,)
         
-        self.criterion = FocalLoss(gamma=2.0,
-                                   alpha=0.25)
-        self.min_ade = [0] * 10
-        self.min_fde = [0] * 10
-        self.b = None
-        self.p = None
+        # self.criterion = FocalLoss(gamma=2.0,
+        #                            alpha=0.25)
+        self.criterion = nn.CrossEntropyLoss(ignore_index=128)
+
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW([
@@ -132,14 +130,15 @@ class MimoLM(pl.LightningModule):
     def training_step(self, batch, **kwargs):
         with torch.no_grad():
             batch = self.preprocessor(batch)
-            motion_tokens = torch.cat((batch["ac/target_pos"], batch["gt/pos"][:, :, ::self.sampling_step,]), dim = -2)
-            actuals, _ = tokenize_motion(motion_tokens,
-                                self.decoder.pos_bins, 
-                                self.decoder.verlet_wrapper, 
-                                self.decoder.n_verlet_steps,
-                                self.decoder.max_delta)
-            actuals = actuals[:, :, self.decoder.step_current:]
-            actuals[~batch['gt/valid'][:, :, ::self.sampling_step]] = self.decoder.mask_token
+            whole_pos = torch.cat([batch['ac/target_pos'], batch["gt/pos"][:, :, ::self.sampling_step]], dim=-2)
+            r_tokens, theta_tokens = tokenize_motion(whole_pos
+                                , self.decoder.max_delta
+                                , self.decoder.r_bins
+                                , self.decoder.theta_bins)
+            actuals_r = r_tokens[:, :, self.decoder.step_current:]
+            actuals_theta = theta_tokens[:, :, self.decoder.step_current:]
+            actuals_r[~batch['gt/valid'][:, :, ::self.sampling_step]] = self.decoder.mask_token
+            actuals_theta[~batch['gt/valid'][:, :, ::self.sampling_step]] = self.decoder.mask_token
             n_batch = batch["ac/target_pos"].shape[0]
             
         target_types = batch["ac/target_type"]
@@ -158,27 +157,33 @@ class MimoLM(pl.LightningModule):
                     target_emb, target_valid, other_emb, other_valid, map_emb, map_valid, input_dict["target_type"], valid
                 )
         valid_mask = torch.cat([batch['input/target_valid'], batch['gt/valid'][:, :, ::self.sampling_step,]], dim=-1)
-        pred, _ = self.decoder(motion_tokens
+        pred_r, pred_theta = self.decoder(whole_pos
                                , target_types
                                , valid_mask
                                , fused_emb
                                , fused_emb_invalid)
         
-        pred = pred[:, self.inference_start - 1: -1, :]
-        loss = self.criterion(pred.flatten(0, 1), actuals.flatten(0, 2))
+        pred_r = pred_r[:, self.inference_start - 1: -1, :]
+        pred_theta = pred_theta[:, self.inference_start - 1: -1, :]
+        # combined r and theta loss
+        loss_r = self.criterion(pred_r.flatten(0, 1), actuals_r.flatten(0, 2))
+        loss_theta = self.criterion(pred_theta.flatten(0, 1), actuals_theta.flatten(0, 2))
+        loss = loss_r + loss_theta
         self.log("train_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True, batch_size=n_batch)
         return loss
     
     def validation_step(self, batch, **kwargs):
         batch = self.preprocessor(batch)
-        motion_tokens = torch.cat((batch["ac/target_pos"], batch["gt/pos"][:, :, ::self.sampling_step,]), dim = -2)
-        actuals, _ = tokenize_motion(motion_tokens,
-            self.decoder.pos_bins, 
-            self.decoder.verlet_wrapper, 
-            self.decoder.n_verlet_steps,
-            self.decoder.max_delta)
-        actuals = actuals[:, :, self.decoder.step_current:]
-        actuals[~batch['gt/valid'][:, :, ::self.sampling_step]] = self.decoder.mask_token
+        whole_pos = torch.cat([batch['ac/target_pos'], batch["gt/pos"][:, :, ::self.sampling_step]], dim=-2)
+        r_tokens, theta_tokens = tokenize_motion(whole_pos
+                            , self.decoder.max_delta
+                            , self.decoder.r_bins
+                            , self.decoder.theta_bins)
+        actuals_r = r_tokens[:, :, self.decoder.step_current:]
+        actuals_theta = theta_tokens[:, :, self.decoder.step_current:]
+        actuals_r[~batch['gt/valid'][:, :, ::self.sampling_step]] = self.decoder.mask_token
+        actuals_theta[~batch['gt/valid'][:, :, ::self.sampling_step]] = self.decoder.mask_token
+
         input_dict = {
         k.split("input/")[-1]: v for k, v in batch.items() if "input/" in k
         }
@@ -195,28 +200,34 @@ class MimoLM(pl.LightningModule):
                     target_emb, target_valid, other_emb, other_valid, map_emb, map_valid, input_dict["target_type"], valid
                 )
         
-        preds = []
         valid_mask = batch['input/target_valid']
         n_batch, n_agents = batch["ac/target_pos"].shape[0], batch["ac/target_pos"].shape[1]
-        for _ in range(self.inference_steps):
+        preds_r = torch.zeros(size=[n_batch * n_agents, self.inference_steps, self.decoder.vocab_size // 2]).to(self.device)
+        preds_theta = torch.zeros(size=[n_batch * n_agents, self.inference_steps, self.decoder.vocab_size // 2]).to(self.device)
+        for i in range(self.inference_steps):
             last_pos = batch["ac/target_pos"][:, :, -1]
-            motion_tokens = batch["ac/target_pos"]
+            curr_pos = batch["ac/target_pos"]
             target_types = batch["ac/target_type"]
-            pred, last_token = self.decoder(motion_tokens
+            pred_r, pred_theta = self.decoder( curr_pos
                                             , target_types
                                             , valid_mask
                                             , fused_emb
                                             , fused_emb_invalid)
-            preds.append(pred[:, -1].unsqueeze(1))
-            pred = F.softmax(pred[:, -1], dim=-1).argmax(dim=1)
-            pred = self.decoder.vocabulary[pred][:, :].unflatten(dim=0, sizes=(n_batch, n_agents))
-            pred = torch.clamp(last_token + pred, min=0, max=191)
-            pred = self.decoder.pos_bins[pred.long()]
-            pred = last_pos + pred
+            preds_r[:, i] = pred_r[:, -1].unsqueeze(0)
+            preds_theta[:, i] = pred_theta[:, -1].unsqueeze(0)
+
+            pred_r = F.softmax(pred_r[:, -1], dim=-1).argmax(dim=1)
+            pred_theta = F.softmax(pred_theta[:, -1], dim=-1).argmax(dim=1)
+
+            d_x, d_y = scalar_to_delta(self.decoder.r_bins[pred_r], self.decoder.theta_bins[pred_theta])
+            d_x = d_x.unflatten(dim=0, sizes=[n_batch, n_agents])
+            d_y = d_y.unflatten(dim=0, sizes=[n_batch, n_agents])
+            pred = last_pos + torch.cat([d_x.unsqueeze(-1), d_y.unsqueeze(-1)], dim=-1)
             batch["ac/target_pos"] = torch.cat((batch["ac/target_pos"], pred.unsqueeze(2)), dim = -2)
 
-        preds = torch.cat(preds, dim=1)
-        loss = self.criterion(preds.flatten(0, 1), actuals.flatten(0, 2))
+        loss_r = self.criterion(preds_r.flatten(0, 1), actuals_r.flatten(0, 2))
+        loss_theta = self.criterion(preds_theta.flatten(0, 1), actuals_theta.flatten(0, 2))
+        loss = loss_r + loss_theta
         self.log("val_loss", loss, on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True, batch_size=n_batch) 
 
         preds = batch["ac/target_pos"][:, :, self.decoder.step_current:, ]
@@ -328,32 +339,19 @@ class MimoLM(pl.LightningModule):
     
     def test_step(self, batch, **kwargs):
         batch = self.preprocessor(batch)
-        #gt_pos = torch.cat([batch["gt/pos"][:, :, ::self.sampling_step], batch["gt/pos"][:, :, -1].unsqueeze(-2)], dim=-2)
-        whole, _ = tokenize_motion(torch.cat([batch['ac/target_pos'], batch["gt/pos"][:, :, ::self.sampling_step]], dim=-2),
-            self.decoder.pos_bins, 
-            self.decoder.verlet_wrapper, 
-            self.decoder.n_verlet_steps,
-            self.decoder.max_delta)
-        actuals = whole[:, :, self.decoder.step_current:]
+        whole_pos = torch.cat([batch['ac/target_pos'], batch["gt/pos"][:, :, ::self.sampling_step]], dim=-2)
+        r_tokens, theta_tokens = tokenize_motion(whole_pos
+                            , self.decoder.max_delta
+                            , self.decoder.r_bins
+                            , self.decoder.theta_bins)
         n_batch, n_agents = batch["ac/target_pos"].shape[0], batch["ac/target_pos"].shape[1]
         #print(f"actuals shape: {actuals.shape}")
-        for i in range(self.inference_steps):
+        for i in range(10, 22):
             last_pos = batch["ac/target_pos"][:, :, -1]
-            motion_tokens = batch["ac/target_pos"]
-            target_types = batch["ac/target_type"]
-            _, last_bin = tokenize_motion(motion_tokens, # [n_batch, n_agents, n_time_steps, 1]
-                                        self.decoder.pos_bins, 
-                                        self.decoder.verlet_wrapper, 
-                                        self.decoder.n_verlet_steps,
-                                        self.decoder.max_delta)
-
-            #print(f"last_bin shape: {last_bin.shape}")
-            pred = self.decoder.vocabulary[actuals[:, :, i]]#.unflatten(dim=0, sizes=(n_batch, n_agents))
-            pred = torch.clamp(last_bin + pred, min=0, max=191)
-            pred = self.decoder.pos_bins[pred.long()]
-            pred = last_pos + pred
+            d_x, d_y = scalar_to_delta(self.decoder.r_bins[r_tokens[:, :, i]], self.decoder.theta_bins[theta_tokens[:, :, i]])
+            pred = last_pos + torch.cat([d_x.unsqueeze(-1), d_y.unsqueeze(-1)], dim=-1)
             batch["ac/target_pos"] = torch.cat((batch["ac/target_pos"], pred.unsqueeze(2)), dim = -2)
-
+        # print(batch["ac/target_pos"])
         preds = batch["ac/target_pos"][:, :, self.decoder.step_current:, ]
         # print(f"preds: {preds[0][0]}")
         # print(f"gt : {batch["gt/pos"][:, :, ::self.sampling_step][0][0]}")
@@ -532,15 +530,15 @@ class MotionDecoder(nn.Module):
             n_heads: int,
             n_layers: int,
             n_quantization_bins: int,
-            n_verlet_steps: int,
             n_time_steps: int,
             time_step_end: int,
+            vocab_size: int
             ) -> None:
         super().__init__()
 
         self.max_delta = max_delta
         self.n_quantization_bins = n_quantization_bins
-        self.n_verlet_steps = n_verlet_steps
+        self.vocab_size = vocab_size
         self.emb_dim = emb_dim
         self.sampling_rate = sampling_rate
         self.sampling_step = 10 // sampling_rate #Argov2 is sampled at 10 Hz native
@@ -551,17 +549,18 @@ class MotionDecoder(nn.Module):
         self.n_rollouts = n_rollouts
         self.n_heads = n_heads
 
-        vocabulary, pos_bins, verlet_wrapper = create_vocabulary(self.n_verlet_steps)
-        self.register_buffer("mask_token", torch.tensor(n_verlet_steps ** 2))
-        self.register_buffer("vocabulary", vocabulary)
-        self.register_buffer("pos_bins", pos_bins)
-        self.register_buffer("verlet_wrapper", verlet_wrapper)
+        r_vocab, theta_vocab, r_bins, theta_bins = create_vocabulary(self.vocab_size // 2 - 1)
+        self.register_buffer("mask_token", torch.tensor(vocab_size // 2 - 1))
+        self.register_buffer("r_vocab", r_vocab)
+        self.register_buffer("theta_vocab", theta_vocab)
+        self.register_buffer("r_bins", r_bins)
+        self.register_buffer("theta_bins", theta_bins)
 
-        self.vocab_size = len(self.vocabulary)
         time_indices = torch.arange(0, self.n_time_steps)
         self.register_buffer("time_indices_type", time_indices)
 
-        self.val_emb_layer = nn.Embedding(self.vocab_size, self.emb_dim)
+        self.val_emb_layer_r = nn.Embedding(self.vocab_size // 2, self.emb_dim // 2)
+        self.val_emb_layer_theta = nn.Embedding(self.vocab_size // 2, self.emb_dim // 2)
         self.step_emb_layer = nn.Embedding(self.n_time_steps, self.emb_dim)
         self.type_emb_layer = nn.Embedding(3, self.emb_dim)
 
@@ -580,12 +579,20 @@ class MotionDecoder(nn.Module):
             nn.Linear(enc_dim + 64, self.emb_dim)
         )
 
-        self.fully_connected_layers = nn.Sequential(
+        self.fully_connected_layers_r = nn.Sequential(
             nn.Linear(self.emb_dim, 512),
             nn.GELU(),
             nn.Linear(512, 256),
             nn.GELU(),
-            nn.Linear(256, self.vocab_size)
+            nn.Linear(256, self.vocab_size // 2)
+        )
+
+        self.fully_connected_layers_theta = nn.Sequential(
+            nn.Linear(self.emb_dim, 512),
+            nn.GELU(),
+            nn.Linear(512, 256),
+            nn.GELU(),
+            nn.Linear(256, self.vocab_size // 2)
         )
     
     def forward(
@@ -604,21 +611,23 @@ class MotionDecoder(nn.Module):
 
         # quantized, discretized, verlet-wrapped motion tokens
         # [n_batch, n_agents, n_time_steps, 1]
-        motion_tokens, last_bin = tokenize_motion(motion_tokens,
-                                        self.pos_bins, 
-                                        self.verlet_wrapper, 
-                                        self.n_verlet_steps,
-                                        self.max_delta)
+        r_tokens, theta_tokens = tokenize_motion(motion_tokens,
+                                        self.max_delta, 
+                                        self.r_bins, 
+                                        self.theta_bins)
 
         if target_valid.shape[-1] != n_steps:
             target_valid = torch.cat([target_valid, torch.ones([n_batch, n_agents, n_steps - target_valid.shape[-1]]).type_as(self.attn_type)], dim=-1)
-        motion_tokens[~target_valid] = self.mask_token
+        r_tokens[~target_valid] = self.mask_token
+        theta_tokens[~target_valid] = self.mask_token
         # mask for self attn
-        key_padding_mask = (motion_tokens == self.mask_token).flatten(1, 2)
+        key_padding_mask = (r_tokens == self.mask_token).flatten(1, 2)
         
-        # we compute a learned value embedding and two learned positional embeddings (representing the timestep and agent identity) for each discrete motion token, which are combined via an element-wise sum prior to being input to the transformer decoder.
-        val_embeddings = self.val_emb_layer(motion_tokens)
-        # todo: is repeating embeddings a good idea?!
+        # from motionlm: we compute a learned value embedding and two learned positional embeddings (representing the timestep and agent identity) for each discrete motion token, which are combined via an element-wise sum prior to being input to the transformer decoder.
+        r_embeddings = self.val_emb_layer_r(r_tokens)
+        theta_embeddings = self.val_emb_layer_theta(theta_tokens)
+        val_embeddings = torch.cat([r_embeddings, theta_embeddings], dim=-1)
+        # todo: is repeating embeddings a good idea?
         step_embeddings = self.step_emb_layer(time_indices
                                               ).unsqueeze(0
                                               ).repeat(n_agents, 1, 1
@@ -643,7 +652,7 @@ class MotionDecoder(nn.Module):
         invalid_agents = fused_emb_invalid.all(dim=-1)
         cross_attn_mask = fused_emb_invalid.clone()
         cross_attn_mask[invalid_agents, ] = False
-        # MotionLM repeats embeddings across rollouts before cross-attention only, here we repeat for both self and cross attention
+        # repeats embeddings across rollouts for both self and cross attention
         for decoder_block in self.decoder_layers:
             if query.shape[0] != n_batch :
                 query = query.unflatten(dim=0, sizes=(n_batch, n_agents)).flatten(1, 2)
@@ -657,36 +666,10 @@ class MotionDecoder(nn.Module):
                                   n_agents = n_agents,
                                   n_steps = n_steps)
             
-        out = self.fully_connected_layers(query)
-        out[:, :, self.mask_token] = 1e-10
-        return out, last_bin
+        out_r = self.fully_connected_layers_r(query)
+        out_theta = self.fully_connected_layers_theta(query)
+        # zero the mask token logits
+        out_r[:, :, self.mask_token] = 1e-10
+        out_theta[:, :, self.mask_token] = 1e-10
+        return out_r, out_theta
     
-
-class FocalLoss(nn.Module):
-    def __init__(self, gamma=2.0, alpha=0.25):
-        super(FocalLoss, self).__init__()
-        self.register_buffer("gamma", torch.tensor(gamma))
-        self.register_buffer("alpha", self.set_alpha(alpha))
-
-    def forward(self, logits, targets):
-        log_p = F.log_softmax(logits, dim=-1)
-        p = torch.exp(log_p)
-        
-        targets_one_hot = F.one_hot(targets, num_classes=logits.shape[1])
-        pt = torch.sum(p * targets_one_hot, dim=-1)
-
-        alpha_t = self.alpha.gather(0, targets)
-        focal_weight = -alpha_t * (1 - pt) ** self.gamma 
-        loss = torch.sum(log_p * targets_one_hot, dim=-1)
-        focal_loss = focal_weight * loss
-
-        return focal_loss.mean()
-
-#based on token disparity
-    def set_alpha(self, a):
-        alpha = torch.ones([170])
-        alpha[0] = a
-        alpha[84] = a
-        alpha[168] = a
-        alpha[169] = 0.
-        return alpha

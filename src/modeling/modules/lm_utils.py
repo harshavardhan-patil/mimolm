@@ -3,8 +3,24 @@ import torch
 import torch.nn.functional as F
 from torch_kmeans import KMeans
 
-def create_vocabulary(n_verlet_steps):
-    # bins set for 2Hz, 18.0m, 192bins
+def delta_to_scalar(delta_x, delta_y):
+    # Compute magnitude
+    magnitude = torch.sqrt(delta_x**2 + delta_y**2)
+    
+    # Compute direction (optional)
+    direction = torch.arctan2(delta_y, delta_x)  # in radians
+    
+    return magnitude, direction
+
+
+def scalar_to_delta(magnitude, direction):
+    # Reconstruct delta x and delta y
+    delta_x = magnitude * torch.cos(direction)
+    delta_y = magnitude * torch.sin(direction)
+    
+    return delta_x, delta_y
+
+def create_vocabulary(vocab_size):
     central_bins = torch.linspace(-0.1, 0.1, 41)
     medium_pos = torch.linspace(0.1, 3.0, 46)
     medium_neg = torch.linspace(-3.0, -0.1, 26)
@@ -17,43 +33,38 @@ def create_vocabulary(n_verlet_steps):
         medium_pos,
         tail_pos
     ]))
-    #verlet_wrapper = torch.tensor([-12, -8, -4, -2, -1,  0,  1,  2,  4,  8,  12,  16,  24])
-    verlet_wrapper = torch.tensor([-10, -8, -6, -4, -2, -1, 0,  1,  2,  4,  6,  8,  10])
-    cartesian_product = torch.tensor(list(itertools.product(verlet_wrapper, verlet_wrapper)))
-    vocabulary = torch.cat((cartesian_product, torch.tensor([float('-inf'), float('-inf')]).unsqueeze(0)), dim=0) # masking token
-    return vocabulary, bins, verlet_wrapper
+
+    r_space = torch.tensor(list(itertools.product(bins, bins)))
+    theta_space = torch.arctan2(r_space[:, 1], r_space[:, 0])
+    
+    r_space = torch.sqrt(r_space[:, 0] ** 2 +  r_space[:, 1] ** 2)
+    r_space = torch.unique(r_space)
+    r_bins = r_space[::r_space.shape[0] // vocab_size]
+    r_vocab = torch.cat([r_bins, torch.tensor([1e-9])]) # additional mask token
+
+    theta_space = torch.unique(theta_space)
+    theta_bins = theta_space[::theta_space.shape[0] // vocab_size]
+    theta_vocab = torch.cat([theta_bins, torch.tensor([1e-9])]) # addtional mask token
+
+    return r_vocab, theta_vocab, r_bins, theta_bins
 
 
-def tokenize_motion(motion_tokens, pos_bins, verlet_wrapper, n_verlet_steps, max_delta):
+def tokenize_motion(motion_tokens, max_delta, r_bins, theta_bins):
     # delta_x and delta_y
     motion_tokens = torch.diff(motion_tokens, dim=2, prepend=motion_tokens[:, :, :1, :])
     # for masking transitional diffs
     invalid_indices = torch.cat(((motion_tokens < -max_delta).nonzero()
                                  , (motion_tokens > max_delta).nonzero())) 
     
-    # MotionLM uses greedy search, using bucketize here for simplicity
-    x_tokens = torch.bucketize(motion_tokens[:, :, :, 0].contiguous(), pos_bins,)
-    y_tokens = torch.bucketize(motion_tokens[:, :, :, 1].contiguous(), pos_bins,)
-    x_last = x_tokens[:, :, -1].unsqueeze(-1)
-    y_last = y_tokens[:, :, -1].unsqueeze(-1)
-    x_tokens_diff = torch.diff(x_tokens, dim=2, prepend = x_tokens[:, :, :1])
-    y_tokens_diff = torch.diff(y_tokens, dim=2, prepend = y_tokens[:, :, :1])
-    # Verlet Wrapper (see paper): The idea is that velocity of cars changes smoothly, 
-    # so we can use a smaller vocabulary to represent the relative motion between the last two time steps.
-    # e.g: max_delta: float = 4.0,  n_quantization_bins: int = 128,  n_verlet_steps: int = 13, 10 Hz predicition, 
-    # the max speed for the modeled agent is 4 x 10 = 40 m/s. 
-    # 0 to max steps in Verlet Wrapper represents the max distance delta modeled. 
-    # THIS IS NO LONGER THE CASE WITH NON-UNIFORM BINS 
-    # For -6 to 6 with 13 steps in Verlet and for 128 bins, the max acceleration between timesteps is 3.1 m/s^2.
-    x_tokens = torch.clamp(torch.bucketize(x_tokens_diff, verlet_wrapper,), min = 0, max = n_verlet_steps - 1)
-    y_tokens = torch.clamp(torch.bucketize(y_tokens_diff, verlet_wrapper,), min = 0, max = n_verlet_steps - 1)
-    # collapse the per-coordinate actions to a single integer indexing into their Cartesian product
-    cart_prod = x_tokens * n_verlet_steps + y_tokens
-    # invalid tokens
-    cart_prod[invalid_indices[:, 0], invalid_indices[:, 1], invalid_indices[:, 2]] = n_verlet_steps ** 2
-    # should be set to mask_token?
-    cart_prod[:, :, :1] = cart_prod[:, :, 1:2]
-    return cart_prod, torch.cat((x_last, y_last), dim=-1),
+    motion_tokens[invalid_indices[:, 0], invalid_indices[:, 1], invalid_indices[:, 2]] = 0.0
+
+    r = torch.sqrt(motion_tokens[:, :, :, 0] ** 2 +  motion_tokens[:, :, :, 1] ** 2)
+    r_tokens = torch.clamp(torch.bucketize(r, r_bins.contiguous()), min=0, max=127)
+
+    theta = torch.arctan2(motion_tokens[:, :, :, 1], motion_tokens[:, :, :, 0])
+    theta_tokens = torch.clamp(torch.bucketize(theta, theta_bins.contiguous()), min=0, max=127)
+
+    return r_tokens, theta_tokens
 
 def get_attention_mask(n_time_steps, size):
     i = torch.arange(size)[:, None] % n_time_steps
