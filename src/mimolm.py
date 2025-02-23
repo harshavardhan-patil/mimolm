@@ -31,14 +31,14 @@ class MimoLM(pl.LightningModule):
     def __init__(
         self,
         data_size,
-        n_rollouts,
-        learning_rate,
+        n_rollouts = 1,
+        learning_rate = 1e-4,
         sampling_rate = 2,
         n_targets = 8,
         enc_dim = 192, #192
         dec_dim = 256,
-        n_heads = 4,
-        n_layers = 4,
+        n_heads = 2,
+        n_layers = 2,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -105,7 +105,12 @@ class MimoLM(pl.LightningModule):
                                 n_heads = n_heads,
                                 n_layers = n_layers,)
         
-        self.criterion = torch.nn.CrossEntropyLoss(ignore_index=int(self.decoder.mask_token))
+        self.criterion = FocalLoss(gamma=2.0,
+                                   alpha=0.25)
+        self.min_ade = [0] * 10
+        self.min_fde = [0] * 10
+        self.b = None
+        self.p = None
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW([
@@ -236,8 +241,94 @@ class MimoLM(pl.LightningModule):
         self.log("MinFDE", np.mean(minfde), on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True, batch_size=n_batch) 
         return loss
     
+    # def test_step(self, batch, batch_idx,**kwargs):
+    #     batch = self.preprocessor(batch)
+    #     self.b = batch.copy()
+    #     motion_tokens = torch.cat((batch["ac/target_pos"], batch["gt/pos"][:, :, ::self.sampling_step,]), dim = -2)
+    #     actuals, _ = tokenize_motion(motion_tokens,
+    #         self.decoder.pos_bins, 
+    #         self.decoder.verlet_wrapper, 
+    #         self.decoder.n_verlet_steps,
+    #         self.decoder.max_delta)
+    #     actuals = actuals[:, :, self.decoder.step_current:]
+    #     actuals[~batch['gt/valid'][:, :, ::self.sampling_step]] = self.decoder.mask_token
+    #     input_dict = {
+    #     k.split("input/")[-1]: v for k, v in batch.items() if "input/" in k
+    #     }
+    #     valid = input_dict["target_valid"].any(-1)
+
+    #     target_emb, target_valid, other_emb, other_valid, map_emb, map_valid = self.input_projections(target_valid = input_dict["target_valid"], 
+    #             target_attr = input_dict["target_attr"],
+    #             other_valid = input_dict["other_valid"],
+    #             other_attr = input_dict["other_attr"],
+    #             map_valid = input_dict["map_valid"],
+    #             map_attr = input_dict["map_attr"],)
+        
+    #     fused_emb, fused_emb_invalid = self.encoder(
+    #                 target_emb, target_valid, other_emb, other_valid, map_emb, map_valid, input_dict["target_type"], valid
+    #             )
+        
+    #     preds = []
+    #     valid_mask = batch['input/target_valid'].repeat_interleave(self.n_rollouts, 0)
+    #     n_batch, n_agents = batch["ac/target_pos"].shape[0], batch["ac/target_pos"].shape[1]
+    #     batch["ac/target_pos"] = batch["ac/target_pos"].repeat_interleave(self.n_rollouts, 0)
+    #     batch["ac/target_type"] = batch["ac/target_type"].repeat_interleave(self.n_rollouts, 0)
+    #     fused_emb = fused_emb.repeat_interleave(self.n_rollouts, 0)
+    #     fused_emb_invalid = fused_emb_invalid.unflatten(0, (n_batch, n_agents)).repeat_interleave(self.n_rollouts, 0).flatten(0, 1)
+    #     # print(f"valid mask: {valid_mask.shape}")
+    #     # print(f"n_batch: {n_batch} n_agents: {n_agents}")
+    #     # print(f"ac/target_pos: {batch["ac/target_pos"].shape}")
+    #     # print(f"ac/target_type: {batch["ac/target_type"].shape}")
+    #     # print(f"fused emb: {fused_emb.shape}")
+    #     # print(f"fused_emb_invalid: {fused_emb_invalid.shape}")
+    #     for _ in range(self.inference_steps):
+    #         last_pos = batch["ac/target_pos"][:, :, -1]
+    #         motion_tokens = batch["ac/target_pos"]
+    #         target_types = batch["ac/target_type"]
+    #         pred, last_token = self.decoder(motion_tokens
+    #                                         , target_types
+    #                                         , valid_mask
+    #                                         , fused_emb
+    #                                         , fused_emb_invalid)
+    #         preds.append(pred[:, -1].unsqueeze(1))
+    #         pred = F.softmax(pred[:, -1], dim=-1).argmax(dim=1)
+    #         pred = self.decoder.vocabulary[pred][:, :].unflatten(dim=0, sizes=(n_batch * self.n_rollouts, n_agents))
+    #         pred = torch.clamp(last_token + pred, min=0, max=191)
+    #         pred = self.decoder.pos_bins[pred.long()]
+    #         pred = last_pos + pred
+    #         batch["ac/target_pos"] = torch.cat((batch["ac/target_pos"], pred.unsqueeze(2)), dim = -2)
+
+    #     # print(f"post ac/target_pos: {batch["ac/target_pos"].shape}")
+    #     # print(f"ref pos: {batch['ref/pos'].shape}")
+    #     preds = batch["ac/target_pos"][:, :, self.decoder.step_current:, ]
+    #     # upsample from 5 Hz to 10 Hz
+    #     preds = F.interpolate(input=preds, size=(60, 2))#interpolate_trajectory(preds, self.sampling_step, self.device)
+    #     minade = [0] * n_batch
+    #     minfde = [0] * n_batch
+    #     #print(preds.shape)
+    #     for n in range(n_batch):
+    #         mode_trajectories, mode_probs = cluster_rollouts(preds[n * self.n_rollouts: (n + 1) * self.n_rollouts], n_clusters=6)
+    #         #print(mode_trajectories.shape)
+    #         # transform to global coordinate
+    #         trajs = torch_pos2global(mode_trajectories, batch['ref/pos'][n:n+1].repeat(6, 1, 1, 1), batch["ref/rot"][n:n+1].repeat(6, 1, 1, 1))
+    #         trajs[~batch['gt/valid'][n:n+1].repeat(6, 1, 1)] = 0.0
+    #         gt_pos = torch_pos2global(batch["gt/pos"][n: n+1], batch['ref/pos'][n:n+1], batch["ref/rot"][n:n+1])
+    #         gt_pos[~batch['gt/valid'][n: n+1]] = 0.0
+    #         forecasted_trajs = trajs.cpu()
+    #         gt_trajs = gt_pos.squeeze(0).cpu()
+    #         minade[n] = min(compute_world_ade(forecasted_trajs.permute(1, 0, 2, 3), gt_trajs))
+    #         minfde[n] = min(compute_world_fde(forecasted_trajs.permute(1, 0, 2, 3), gt_trajs))
+    #         self.p = forecasted_trajs
+        
+    #     self.min_ade[batch_idx] = np.mean(minade)
+    #     self.min_fde[batch_idx] = np.mean(minfde)
+    #     self.log("MinADE", np.mean(minade), on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True, batch_size=n_batch) 
+    #     self.log("MinFDE", np.mean(minfde), on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True, batch_size=n_batch) 
+    #     return 0
+    
     def test_step(self, batch, **kwargs):
         batch = self.preprocessor(batch)
+        #gt_pos = torch.cat([batch["gt/pos"][:, :, ::self.sampling_step], batch["gt/pos"][:, :, -1].unsqueeze(-2)], dim=-2)
         whole, _ = tokenize_motion(torch.cat([batch['ac/target_pos'], batch["gt/pos"][:, :, ::self.sampling_step]], dim=-2),
             self.decoder.pos_bins, 
             self.decoder.verlet_wrapper, 
@@ -512,7 +603,8 @@ class MotionDecoder(nn.Module):
         time_indices = torch.arange(0, n_steps).type_as(self.time_indices_type)
 
         # quantized, discretized, verlet-wrapped motion tokens
-        motion_tokens, last_bin = tokenize_motion(motion_tokens, # [n_batch, n_agents, n_time_steps, 1]
+        # [n_batch, n_agents, n_time_steps, 1]
+        motion_tokens, last_bin = tokenize_motion(motion_tokens,
                                         self.pos_bins, 
                                         self.verlet_wrapper, 
                                         self.n_verlet_steps,
@@ -566,5 +658,35 @@ class MotionDecoder(nn.Module):
                                   n_steps = n_steps)
             
         out = self.fully_connected_layers(query)
-        out[:, :, self.mask_token] = float('-inf')
+        out[:, :, self.mask_token] = 1e-10
         return out, last_bin
+    
+
+class FocalLoss(nn.Module):
+    def __init__(self, gamma=2.0, alpha=0.25):
+        super(FocalLoss, self).__init__()
+        self.register_buffer("gamma", torch.tensor(gamma))
+        self.register_buffer("alpha", self.set_alpha(alpha))
+
+    def forward(self, logits, targets):
+        log_p = F.log_softmax(logits, dim=-1)
+        p = torch.exp(log_p)
+        
+        targets_one_hot = F.one_hot(targets, num_classes=logits.shape[1])
+        pt = torch.sum(p * targets_one_hot, dim=-1)
+
+        alpha_t = self.alpha.gather(0, targets)
+        focal_weight = -alpha_t * (1 - pt) ** self.gamma 
+        loss = torch.sum(log_p * targets_one_hot, dim=-1)
+        focal_loss = focal_weight * loss
+
+        return focal_loss.mean()
+
+#based on token disparity
+    def set_alpha(self, a):
+        alpha = torch.ones([170])
+        alpha[0] = a
+        alpha[84] = a
+        alpha[168] = a
+        alpha[169] = 0.
+        return alpha

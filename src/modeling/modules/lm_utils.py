@@ -17,7 +17,6 @@ def create_vocabulary(n_verlet_steps):
         medium_pos,
         tail_pos
     ]))
-    #verlet_wrapper = torch.tensor([-16, -8, -4, -2, -1,  0,  1,  2,  4,  8,  24,  36,  48])
     #verlet_wrapper = torch.tensor([-12, -8, -4, -2, -1,  0,  1,  2,  4,  8,  12,  16,  24])
     verlet_wrapper = torch.tensor([-10, -8, -6, -4, -2, -1, 0,  1,  2,  4,  6,  8,  10])
     cartesian_product = torch.tensor(list(itertools.product(verlet_wrapper, verlet_wrapper)))

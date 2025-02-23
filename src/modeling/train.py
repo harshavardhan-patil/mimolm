@@ -25,10 +25,9 @@ def main(args):
     seed_everything(args.seed, workers=True)
     data_module = DataH5av2(BASE_PATH + "mimolm/data")
     data_module.setup(stage="fit")
-    model = MimoLM.load_from_checkpoint(checkpoint_path= BASE_PATH + 'mimolm/ckpts/lightning_logs/version_2/checkpoints/epoch=9-step=2610.ckpt'
-                , data_size=data_module.tensor_size_train
+    model = MimoLM(data_size=data_module.tensor_size_train
                 , n_rollouts = args.n_rollouts
-                , learning_rate = args.learning_rate,)
+                , learning_rate = float(args.learning_rate))
 
     checkpoint_callback = ModelCheckpoint(
         save_top_k=-1,  # Save all checkpoints
@@ -54,7 +53,7 @@ if __name__ == "__main__":
     parser.add_argument("--devices", default=None)
     parser.add_argument("--strategy", default=None)
     parser.add_argument("--seed", default=43)
-    parser.add_argument("--learning_rate", default=1.e-04)
+    parser.add_argument("--learning_rate", default=6.e-04)
     parser.add_argument("--n_rollouts", default=1)
     parser.add_argument("--max_epochs", default=1)
     args = parser.parse_args()
