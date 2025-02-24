@@ -1,5 +1,10 @@
 # Data
-/data/
+/data/interim
+/data/processed
+/data/raw
+
+# Lightning logs
+/notebooks/lightning_logs
 
 # Mac OS-specific storage files
 .DS_Store

@@ -9,28 +9,27 @@ from src.external.hptr.src.utils.pose_pe import PosePE
 class AgentCentricGlobal(nn.Module):
     def __init__(
         self,
+        sampling_rate: int,
         time_step_current: int,
         data_size: DictConfig,
         dropout_p_history: float,
-        use_current_tl: bool,
         add_ohe: bool,
         pl_aggr: bool,
         pose_pe: DictConfig,
     ) -> None:
         super().__init__()
         self.dropout_p_history = dropout_p_history  # [0, 1], turn off if set to negative
-        self.step_current = time_step_current
-        self.n_step_hist = time_step_current + 1
-        self.use_current_tl = use_current_tl
+        self.sampling_rate = sampling_rate
+        self.sampling_step = 10 // sampling_rate #Argov2 is sampled at 10 Hz native
+        self.step_current = (time_step_current + 1) // self.sampling_step - 1
+        self.n_step_hist = self.step_current + 1
         self.add_ohe = add_ohe
         self.pl_aggr = pl_aggr
         self.n_pl_node = data_size["map/valid"][-1]
 
         self.pose_pe_agent = PosePE(pose_pe["agent"])
         self.pose_pe_map = PosePE(pose_pe["map"])
-        self.pose_pe_tl = PosePE(pose_pe["tl"])
 
-        tl_attr_dim = self.pose_pe_tl.out_dim + data_size["tl_stop/state"][-1]
         if self.pl_aggr:
             agent_attr_dim = (
                 self.pose_pe_agent.out_dim * self.n_step_hist
@@ -61,16 +60,12 @@ class AgentCentricGlobal(nn.Module):
             if not self.pl_aggr:
                 map_attr_dim += self.n_pl_node
                 agent_attr_dim += self.n_step_hist
-            if not self.use_current_tl:
-                tl_attr_dim += self.n_step_hist
 
         self.model_kwargs = {
             "agent_attr_dim": agent_attr_dim,
             "map_attr_dim": map_attr_dim,
-            "tl_attr_dim": tl_attr_dim,
             "n_step_hist": self.n_step_hist,
             "n_pl_node": self.n_pl_node,
-            "use_current_tl": self.use_current_tl,
             "pl_aggr": self.pl_aggr,
         }
 
@@ -90,7 +85,7 @@ class AgentCentricGlobal(nn.Module):
                 "gt/spd": [n_scene, n_target, n_step_future, 1]
                 "gt/vel": [n_scene, n_target, n_step_future, 2]
                 "gt/yaw_bbox": [n_scene, n_target, n_step_future, 1]
-                "gt/cmd": [n_scene, n_target, 8]
+                "gt/cmd": [n_scene, n_target, 8] removed this for n ow
             # (ac) agent-centric target agents states
                 "ac/target_valid": [n_scene, n_target, n_step_hist]
                 "ac/target_pos": [n_scene, n_target, n_step_hist, 2]
@@ -120,89 +115,37 @@ class AgentCentricGlobal(nn.Module):
                 "ac/map_type": [n_scene, n_target, n_map, 11], bool one_hot
                 "ac/map_pos": [n_scene, n_target, n_map, n_pl_node, 2], float32
                 "ac/map_dir": [n_scene, n_target, n_map, n_pl_node, 2], float32
-            # traffic lights
-                "ac/tl_valid": [n_scene, n_target, n_step_hist, n_tl], bool
-                "ac/tl_state": [n_scene, n_target, n_step_hist, n_tl, 5], bool one_hot
-                "ac/tl_pos": [n_scene, n_target, n_step_hist, n_tl, 2], x,y
-                "ac/tl_dir": [n_scene, n_target, n_step_hist, n_tl, 2], x,y
 
         Returns: add following keys to batch Dict
             # target type: no need to be aggregated.
                 "input/target_type": [n_scene, n_target, 3]
             # target history, other history, map
-                if pl_aggr:
-                    "input/target_valid": [n_scene, n_target], bool
-                    "input/target_attr": [n_scene, n_target, agent_attr_dim]
-                    "input/other_valid": [n_scene, n_target, n_other], bool
-                    "input/other_attr": [n_scene, n_target, n_other, agent_attr_dim]
-                    "input/map_valid": [n_scene, n_target, n_map], bool
-                    "input/map_attr": [n_scene, n_target, n_map, map_attr_dim]
-                else:
                     "input/target_valid": [n_scene, n_target, n_step_hist], bool
                     "input/target_attr": [n_scene, n_target, n_step_hist, agent_attr_dim]
                     "input/other_valid": [n_scene, n_target, n_other, n_step_hist], bool
                     "input/other_attr": [n_scene, n_target, n_other, n_step_hist, agent_attr_dim]
                     "input/map_valid": [n_scene, n_target, n_map, n_pl_node], bool
                     "input/map_attr": [n_scene, n_target, n_map, n_pl_node, map_attr_dim]
-            # traffic lights: stop point, cannot be aggregated, detections are not tracked, singular node polyline.
-                if use_current_tl:
-                    "input/tl_valid": [n_scene, n_target, 1, n_tl], bool
-                    "input/tl_attr": [n_scene, n_target, 1, n_tl, tl_attr_dim]
-                else:
-                    "input/tl_valid": [n_scene, n_target, n_step_hist, n_tl], bool
-                    "input/tl_attr": [n_scene, n_target, n_step_hist, n_tl, tl_attr_dim]
         """
         batch["input/target_type"] = batch["ac/target_type"]
         valid = batch["ac/target_valid"][:, :, [self.step_current]].unsqueeze(-1)  # [n_scene, n_target, 1, 1]
         batch["input/target_valid"] = batch["ac/target_valid"]  # [n_scene, n_target, n_step_hist]
         batch["input/other_valid"] = batch["ac/other_valid"] & valid  # [n_scene, n_target, n_other, n_step_hist]
-        batch["input/tl_valid"] = batch["ac/tl_valid"] & valid  # [n_scene, n_target, n_step_hist, n_tl]
         batch["input/map_valid"] = batch["ac/map_valid"] & valid  # [n_scene, n_target, n_map, n_pl_node]
 
-        # ! randomly mask history target/other/tl
-        if self.training and (0 < self.dropout_p_history <= 1.0):
-            prob_mask = torch.ones_like(batch["input/target_valid"][..., :-1]) * (1 - self.dropout_p_history)
-            batch["input/target_valid"][..., :-1] &= torch.bernoulli(prob_mask).bool()
-            prob_mask = torch.ones_like(batch["input/other_valid"]) * (1 - self.dropout_p_history)
-            batch["input/other_valid"] &= torch.bernoulli(prob_mask).bool()
-            prob_mask = torch.ones_like(batch["input/tl_valid"]) * (1 - self.dropout_p_history)
-            batch["input/tl_valid"] &= torch.bernoulli(prob_mask).bool()
-            prob_mask = torch.ones_like(batch["input/map_valid"]) * (1 - self.dropout_p_history)
-            batch["input/map_valid"] &= torch.bernoulli(prob_mask).bool()
-
         # ! prepare "input/target_attr"
-        if self.pl_aggr:  # [n_scene, n_target, agent_attr_dim]
-            target_invalid = ~batch["input/target_valid"].unsqueeze(-1)  # [n_scene, n_target, n_step_hist, 1]
-            target_invalid_reduced = target_invalid.all(-2)  # [n_scene, n_target, 1]
-            batch["input/target_attr"] = torch.cat(
-                [
-                    self.pose_pe_agent(batch["ac/target_pos"], batch["ac/target_yaw_bbox"])
-                    .masked_fill(target_invalid, 0)
-                    .flatten(-2, -1),
-                    batch["ac/target_vel"].masked_fill(target_invalid, 0).flatten(-2, -1),  # n_step_hist*2
-                    batch["ac/target_spd"].masked_fill(target_invalid, 0).squeeze(-1),  # n_step_hist
-                    batch["ac/target_yaw_rate"].masked_fill(target_invalid, 0).squeeze(-1),  # n_step_hist
-                    batch["ac/target_acc"].masked_fill(target_invalid, 0).squeeze(-1),  # n_step_hist
-                    batch["ac/target_size"].masked_fill(target_invalid_reduced, 0),  # 3
-                    batch["ac/target_type"].masked_fill(target_invalid_reduced, 0),  # 3
-                    batch["input/target_valid"],  # n_step_hist
-                ],
-                dim=-1,
-            )
-            batch["input/target_valid"] = batch["input/target_valid"].any(-1)  # [n_scene, n_target]
-        else:  # [n_scene, n_target, n_step_hist, agent_attr_dim]
-            batch["input/target_attr"] = torch.cat(
-                [
-                    self.pose_pe_agent(batch["ac/target_pos"], batch["ac/target_yaw_bbox"]),
-                    batch["ac/target_vel"],  # vel xy, 2
-                    batch["ac/target_spd"],  # speed, 1
-                    batch["ac/target_yaw_rate"],  # yaw rate, 1
-                    batch["ac/target_acc"],  # acc, 1
-                    batch["ac/target_size"].unsqueeze(-2).expand(-1, -1, self.n_step_hist, -1),  # 3
-                    batch["ac/target_type"].unsqueeze(-2).expand(-1, -1, self.n_step_hist, -1),  # 3
-                ],
-                dim=-1,
-            )
+        batch["input/target_attr"] = torch.cat(
+            [
+                self.pose_pe_agent(batch["ac/target_pos"], batch["ac/target_yaw_bbox"]),
+                batch["ac/target_vel"],  # vel xy, 2
+                batch["ac/target_spd"],  # speed, 1
+                batch["ac/target_yaw_rate"],  # yaw rate, 1
+                batch["ac/target_acc"],  # acc, 1
+                batch["ac/target_size"].unsqueeze(-2).expand(-1, -1, self.n_step_hist, -1),  # 3
+                batch["ac/target_type"].unsqueeze(-2).expand(-1, -1, self.n_step_hist, -1),  # 3
+            ],
+            dim=-1,
+        )
 
         # ! prepare "input/other_attr"
         if self.pl_aggr:  # [n_scene, n_target, n_other, agent_attr_dim]
@@ -262,18 +205,6 @@ class AgentCentricGlobal(nn.Module):
                 dim=-1,
             )
 
-        # ! prepare "input/tl_attr": [n_scene, n_target, n_step_hist/1, n_tl, tl_attr_dim]
-        # [n_scene, n_target, n_step_hist, n_tl, 2]
-        tl_pos = batch["ac/tl_pos"]
-        tl_dir = batch["ac/tl_dir"]
-        tl_state = batch["ac/tl_state"]
-        if self.use_current_tl:
-            tl_pos = tl_pos[:, :, [-1]]  # [n_scene, n_target, 1, n_tl, 2]
-            tl_dir = tl_dir[:, :, [-1]]  # [n_scene, n_target, 1, n_tl, 2]
-            tl_state = tl_state[:, :, [-1]]  # [n_scene, n_target, 1, n_tl, 5]
-            batch["input/tl_valid"] = batch["input/tl_valid"][:, :, [-1]]  # [n_scene, n_target, 1, n_tl]
-        batch["input/tl_attr"] = torch.cat([self.pose_pe_tl(tl_pos, tl_dir), tl_state], dim=-1)
-
         # ! add one-hot encoding for sequence (temporal, order of polyline nodes)
         if self.add_ohe:
             n_scene, n_target, n_other, _ = batch["ac/other_valid"].shape
@@ -297,16 +228,6 @@ class AgentCentricGlobal(nn.Module):
                     [
                         batch["input/map_attr"],
                         self.pl_node_ohe[None, None, None, :, :].expand(n_scene, n_target, n_map, -1, -1),
-                    ],
-                    dim=-1,
-                )
-
-            if not self.use_current_tl:  # there is no need to add ohe if use_current_tl
-                n_tl = batch["input/tl_valid"].shape[-1]
-                batch["input/tl_attr"] = torch.cat(
-                    [
-                        batch["input/tl_attr"],
-                        self.history_step_ohe[None, None, :, None, :].expand(n_scene, n_target, -1, n_tl, -1),
                     ],
                     dim=-1,
                 )

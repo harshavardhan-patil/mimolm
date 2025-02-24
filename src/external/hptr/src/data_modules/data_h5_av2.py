@@ -1,6 +1,6 @@
 # Licensed under the CC BY-NC 4.0 license (https://creativecommons.org/licenses/by-nc/4.0/)
 from typing import Optional, Dict, Any, Tuple
-from pytorch_lightning import LightningDataModule
+from lightning.pytorch import LightningDataModule
 from torch.utils.data import DataLoader, Dataset
 import numpy as np
 import h5py
@@ -32,14 +32,21 @@ class DatasetTrain(DatasetBase):
             for k, _size in self.tensor_size.items():
                 if k in hf[idx_key]:
                     out_dict[k] = np.ascontiguousarray(hf[idx_key][k])
-
+                else:
+                    if "/valid" in k or "/state" in k:
+                        _dtype = bool
+                    elif "/idx" in k:
+                        _dtype = np.int64
+                    else:
+                        _dtype = np.float32
+                    out_dict[k] = np.zeros(_size, dtype=_dtype)
         return out_dict
 
 
 class DatasetVal(DatasetBase):
     # for validation.h5 and testing.h5
     def __getitem__(self, idx: int) -> Dict[str, np.ndarray]:
-        idx_key = str(idx)
+        idx_key = str(np.random.randint(self.dataset_len))
         with h5py.File(self.filepath, "r", libver="latest", swmr=True) as hf:
             out_dict = {
                 "episode_idx": idx,
@@ -51,7 +58,14 @@ class DatasetVal(DatasetBase):
             for k, _size in self.tensor_size.items():
                 if k in hf[idx_key]:
                     out_dict[k] = np.ascontiguousarray(hf[idx_key][k])
-                
+                else:
+                    if "/valid" in k or "/state" in k:
+                        _dtype = bool
+                    elif "/idx" in k:
+                        _dtype = np.int64
+                    else:
+                        _dtype = np.float32
+                    out_dict[k] = np.zeros(_size, dtype=_dtype)
                 if out_dict[k].shape != _size:
                     assert "agent" in k
                     out_dict[k] = np.ones(_size, dtype=out_dict[k].dtype)
@@ -63,10 +77,10 @@ class DataH5av2(LightningDataModule):
         self,
         data_dir: str,
         filename_train: str = "train",
-        filename_val: str = "validation",
-        filename_test: str = "testing",
-        batch_size: int = 3,
-        num_workers: int = 4,
+        filename_val: str = "val", # 24988 scenarios
+        filename_test: str = "test",
+        batch_size: int = 2, # 112 8x80-GB, 2 - local, 48 - 1xA100, 128 - 1xH200, 1 - testing (rollouts + nms) 
+        num_workers: int = 15, # 15 -local, 11 - Colab, 63 - LL 1xH200
         n_agent: int = 64,  # if not the same as h5 dataset, use dummy agents, for scalability tests.
     ) -> None:
         super().__init__()
@@ -84,6 +98,8 @@ class DataH5av2(LightningDataModule):
         n_pl = 1024
         n_pl_node = 20
 
+        n_tl = 1
+        n_tl_stop = 1
         self.tensor_size_train = {
             # agent states
             "agent/valid": (n_step, n_agent),  # bool,
@@ -107,6 +123,14 @@ class DataH5av2(LightningDataModule):
             "map/pos": (n_pl, n_pl_node, 2),  # float32
             "map/dir": (n_pl, n_pl_node, 2),  # float32
             "map/boundary": (4,),  # xmin, xmax, ymin, ymax
+            # dummy traffic lights
+            "tl_lane/valid": (n_step, n_tl),  # bool
+            "tl_lane/state": (n_step, n_tl, 5),  # bool one_hot
+            "tl_lane/idx": (n_step, n_tl),  # int, -1 means not valid
+            "tl_stop/valid": (n_step, n_tl_stop),  # bool
+            "tl_stop/state": (n_step, n_tl_stop, 5),  # bool one_hot
+            "tl_stop/pos": (n_step, n_tl_stop, 2),  # x,y
+            "tl_stop/dir": (n_step, n_tl_stop, 2),  # x,y
         }
 
         self.tensor_size_test = {
@@ -138,6 +162,14 @@ class DataH5av2(LightningDataModule):
             "map/pos": (n_pl, n_pl_node, 2),  # float32
             "map/dir": (n_pl, n_pl_node, 2),  # float32
             "map/boundary": (4,),  # xmin, xmax, ymin, ymax
+            # dummy traffic_light
+            "history/tl_lane/valid": (n_step_history, n_tl),  # bool
+            "history/tl_lane/state": (n_step_history, n_tl, 5),  # bool one_hot
+            "history/tl_lane/idx": (n_step_history, n_tl),  # int, -1 means not valid
+            "history/tl_stop/valid": (n_step_history, n_tl_stop),  # bool
+            "history/tl_stop/state": (n_step_history, n_tl_stop, 5),  # bool one_hot
+            "history/tl_stop/pos": (n_step_history, n_tl_stop, 2),  # x,y
+            "history/tl_stop/dir": (n_step_history, n_tl_stop, 2),  # dx,dy
         }
 
         self.tensor_size_val = {
@@ -158,7 +190,7 @@ class DataH5av2(LightningDataModule):
     def setup(self, stage: Optional[str] = None) -> None:
         if stage == "fit" or stage is None:
             self.train_dataset = DatasetTrain(self.path_train_h5, self.tensor_size_train)
-            #self.val_dataset = DatasetVal(self.path_val_h5, self.tensor_size_val)
+            self.val_dataset = DatasetVal(self.path_val_h5, self.tensor_size_val)
         elif stage == "validate":
             self.val_dataset = DatasetVal(self.path_val_h5, self.tensor_size_val)
         elif stage == "test":
@@ -179,7 +211,7 @@ class DataH5av2(LightningDataModule):
             ds,
             batch_size=batch_size,
             num_workers=num_workers,
-            pin_memory=True,
+            pin_memory=False,
             shuffle=False,
             drop_last=False,
             persistent_workers=True,
