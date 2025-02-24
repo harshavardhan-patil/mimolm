@@ -74,18 +74,32 @@ def get_attention_mask(n_time_steps, size):
     return mask
 
 def nucleus_sampling(logits, top_p=0.95):
-    probs = F.softmax(logits, dim=-1)
+    """
+    Perform nucleus (top-p) sampling on logits.
+
+    Args:
+        logits (torch.Tensor): Logits tensor of shape (..., vocab_size)
+        top_p (float): Cumulative probability threshold for nucleus sampling.
+
+    Returns:
+        torch.Tensor: Sampled indices.
+    """
+    probs = F.softmax(logits, dim=-1)  # Convert logits to probabilities
     sorted_probs, sorted_indices = torch.sort(probs, descending=True, dim=-1)
     cumulative_probs = torch.cumsum(sorted_probs, dim=-1)
 
     # Mask tokens outside top_p
     nucleus = cumulative_probs < top_p
-    nucleus = torch.cat([nucleus.new_ones(nucleus.shape[:-1] + (1,)), nucleus[..., :-1]], dim=-1)
-    sorted_log_probs = torch.log(sorted_probs)
-    sorted_log_probs[~nucleus] = float('-inf')
-    
+    nucleus[..., 0] = True  # Ensure at least one token is included
+
+    # Mask out probabilities outside nucleus and renormalize
+    sorted_probs[~nucleus] = 0
+    sorted_probs = sorted_probs / sorted_probs.sum(dim=-1, keepdim=True)
+
     # Sample from the filtered distribution
     sampled_indices = torch.multinomial(sorted_probs, num_samples=1).squeeze(-1)
+
+    # Map back to original indices
     return sorted_indices.gather(-1, sampled_indices.unsqueeze(-1)).squeeze(-1)
 
 def interpolate_trajectory(trajectory, scale_factor, device):
@@ -145,29 +159,32 @@ def non_maximum_suppression(trajectories, threshold):
     return trajectories[keep_indices]
 
 
-def cluster_rollouts(trajectories, n_clusters):
+def cluster_rollouts(trajectories, n_clusters=6):
     """
     Apply K-Means clustering to the NMS-filtered trajectories.
-    - trajectories: numpy array of shape (n_filtered_rollouts, n_agents, 60, 2)
-    - n_clusters: desired number of representative joint trajectory modes
-    - Returns: cluster centers (mode trajectories) and mode probabilities
+    
+    Args:
+        trajectories: Tensor of shape (n_rollouts, n_agents, 60, 2)
+        n_clusters: Desired number of representative joint trajectory modes
+    
+    Returns:
+        cluster_centers (Tensor): Clustered trajectory centers
+        mode_probs (Tensor): Probability of each mode
     """
     n_rollouts, n_agents, timesteps, _ = trajectories.shape
+    n_clusters = min(n_clusters, n_rollouts)  # Ensure clusters do not exceed rollouts
 
-    # Flatten each trajectory for clustering (n_rollouts, n_agents * n_time_steps * 2)
+    # Flatten each trajectory for clustering (n_rollouts, n_agents * timesteps * 2)
     reshaped_traj = trajectories.flatten(1, 3)
 
     # Apply K-Means clustering
-    kmeans = KMeans(init_method="k-means++"
-                    , num_init=reshaped_traj.shape[0] - 1 # doesnt support n_sample as clusters
-                    , n_clusters=n_clusters
-                    , random_state=42
-                    , verbose=False) 
+    kmeans = KMeans(init_method="k-means++", num_init=10, n_clusters=n_clusters, random_state=42, verbose=False)
     results = kmeans(reshaped_traj.unsqueeze(0))
+
     cluster_labels = results.labels.squeeze(0)
     cluster_centers = results.centers.squeeze(0).unflatten(dim=1, sizes=(n_agents, timesteps, 2))
 
-    # Compute mode probabilities based on cluster assignment
-    mode_probs = torch.bincount(cluster_labels) / len(cluster_labels)
+    # Compute mode probabilities with minlength to ensure all clusters are represented
+    mode_probs = torch.bincount(cluster_labels, minlength=n_clusters) / len(cluster_labels)
 
     return cluster_centers, mode_probs

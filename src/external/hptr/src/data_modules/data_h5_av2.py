@@ -46,7 +46,7 @@ class DatasetTrain(DatasetBase):
 class DatasetVal(DatasetBase):
     # for validation.h5 and testing.h5
     def __getitem__(self, idx: int) -> Dict[str, np.ndarray]:
-        idx_key = str(np.random.randint(self.dataset_len))#str(idx)
+        idx_key = str(np.random.randint(self.dataset_len))
         with h5py.File(self.filepath, "r", libver="latest", swmr=True) as hf:
             out_dict = {
                 "episode_idx": idx,
@@ -78,7 +78,7 @@ class DataH5av2(LightningDataModule):
         data_dir: str,
         filename_train: str = "train",
         filename_val: str = "val", # 24988 scenarios
-        filename_test: str = "testing",
+        filename_test: str = "test",
         batch_size: int = 2, # 112 8x80-GB, 2 - local, 48 - 1xA100, 128 - 1xH200, 1 - testing (rollouts + nms) 
         num_workers: int = 15, # 15 -local, 11 - Colab, 63 - LL 1xH200
         n_agent: int = 64,  # if not the same as h5 dataset, use dummy agents, for scalability tests.

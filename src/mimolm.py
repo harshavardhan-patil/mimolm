@@ -105,9 +105,9 @@ class MimoLM(pl.LightningModule):
                                 n_heads = n_heads,
                                 n_layers = n_layers,)
         
-        # self.criterion = FocalLoss(gamma=2.0,
-        #                            alpha=0.25)
         self.criterion = nn.CrossEntropyLoss(ignore_index=128)
+        
+        self.predictions = {}
 
 
     def configure_optimizers(self):
@@ -287,7 +287,7 @@ class MimoLM(pl.LightningModule):
         fused_emb = fused_emb.repeat_interleave(self.n_rollouts, 0)
         fused_emb_invalid = fused_emb_invalid.unflatten(0, (n_batch, n_agents)).repeat_interleave(self.n_rollouts, 0).flatten(0, 1)
 
-        for _ in range(self.inference_steps):
+        for i in range(self.inference_steps):
             last_pos = batch["ac/target_pos"][:, :, -1]
             curr_pos = batch["ac/target_pos"]
             target_types = batch["ac/target_type"]
@@ -297,12 +297,11 @@ class MimoLM(pl.LightningModule):
                                             , fused_emb
                                             , fused_emb_invalid)
             
-            pred_r = F.softmax(pred_r[:, -1], dim=-1).argmax(dim=1)
-            pred_theta = F.softmax(pred_theta[:, -1], dim=-1).argmax(dim=1)
-
+            pred_r = nucleus_sampling(pred_r[:, -1]).unflatten(dim=0, sizes=[n_batch * self.n_rollouts, n_agents])
+            pred_theta = nucleus_sampling(pred_theta[:, -1]).unflatten(dim=0, sizes=[n_batch * self.n_rollouts, n_agents])
             d_x, d_y = scalar_to_delta(self.decoder.r_bins[pred_r], self.decoder.theta_bins[pred_theta])
-            d_x = d_x.unflatten(dim=0, sizes=[n_batch * self.n_rollouts, n_agents])
-            d_y = d_y.unflatten(dim=0, sizes=[n_batch * self.n_rollouts, n_agents])
+            # d_x = d_x.unflatten(dim=0, sizes=[n_batch * self.n_rollouts, n_agents])
+            # d_y = d_y.unflatten(dim=0, sizes=[n_batch * self.n_rollouts, n_agents])
             pred = last_pos + torch.cat([d_x.unsqueeze(-1), d_y.unsqueeze(-1)], dim=-1)
             batch["ac/target_pos"] = torch.cat((batch["ac/target_pos"], pred.unsqueeze(2)), dim = -2)
 
@@ -313,10 +312,12 @@ class MimoLM(pl.LightningModule):
         preds = F.interpolate(input=preds, size=(60, 2))#interpolate_trajectory(preds, self.sampling_step, self.device)
         minade = [0] * n_batch
         minfde = [0] * n_batch
+        briermindfde = [0] * n_batch
         #print(preds.shape)
         for n in range(n_batch):
-            mode_trajectories, mode_probs = cluster_rollouts(preds[n * self.n_rollouts: (n + 1) * self.n_rollouts], n_clusters=6)
-            #print(mode_trajectories.shape)
+            mode_trajectories = preds[n * self.n_rollouts: (n + 1) * self.n_rollouts]
+            #mode_trajectories = non_maximum_suppression(mode_trajectories, .5)
+            mode_trajectories, mode_probs = cluster_rollouts(mode_trajectories, n_clusters=6)
             # transform to global coordinate
             trajs = torch_pos2global(mode_trajectories, batch['ref/pos'][n:n+1].repeat(6, 1, 1, 1), batch["ref/rot"][n:n+1].repeat(6, 1, 1, 1))
             trajs[~batch['gt/valid'][n:n+1].repeat(6, 1, 1)] = 0.0
@@ -324,11 +325,14 @@ class MimoLM(pl.LightningModule):
             gt_pos[~batch['gt/valid'][n: n+1]] = 0.0
             forecasted_trajs = trajs.cpu()
             gt_trajs = gt_pos.squeeze(0).cpu()
+            mode_probs = mode_probs.cpu()
             minade[n] = min(compute_world_ade(forecasted_trajs.permute(1, 0, 2, 3), gt_trajs))
             minfde[n] = min(compute_world_fde(forecasted_trajs.permute(1, 0, 2, 3), gt_trajs))
+            briermindfde[n] = min(compute_world_brier_fde(forecasted_trajs.permute(1, 0, 2, 3), gt_trajs, mode_probs))
 
         self.log("MinADE", np.mean(minade), on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True, batch_size=n_batch) 
         self.log("MinFDE", np.mean(minfde), on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True, batch_size=n_batch) 
+        self.log("BrierMinFDE", np.mean(briermindfde), on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True, batch_size=n_batch) 
         return 0
     
     # def test_step(self, batch, **kwargs):
@@ -372,6 +376,88 @@ class MimoLM(pl.LightningModule):
     #     self.log("MinFDE", np.mean(minfde), on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True, batch_size=n_batch) 
     #     return -1
      
+    def predict_step(self, batch, **kwargs):
+        batch = self.preprocessor(batch)
+        input_dict = {
+        k.split("input/")[-1]: v for k, v in batch.items() if "input/" in k
+        }
+        valid = input_dict["target_valid"].any(-1)
+
+        target_emb, target_valid, other_emb, other_valid, map_emb, map_valid = self.input_projections(target_valid = input_dict["target_valid"], 
+                target_attr = input_dict["target_attr"],
+                other_valid = input_dict["other_valid"],
+                other_attr = input_dict["other_attr"],
+                map_valid = input_dict["map_valid"],
+                map_attr = input_dict["map_attr"],)
+        
+        fused_emb, fused_emb_invalid = self.encoder(
+                    target_emb, target_valid, other_emb, other_valid, map_emb, map_valid, input_dict["target_type"], valid
+                )
+        
+        n_batch, n_agents = batch["ac/target_pos"].shape[0], batch["ac/target_pos"].shape[1]
+        valid_mask = batch['input/target_valid'].repeat_interleave(self.n_rollouts, 0)
+        batch["ac/target_pos"] = batch["ac/target_pos"].repeat_interleave(self.n_rollouts, 0)
+        batch["ac/target_type"] = batch["ac/target_type"].repeat_interleave(self.n_rollouts, 0)
+        fused_emb = fused_emb.repeat_interleave(self.n_rollouts, 0)
+        fused_emb_invalid = fused_emb_invalid.unflatten(0, (n_batch, n_agents)).repeat_interleave(self.n_rollouts, 0).flatten(0, 1)
+
+        for i in range(self.inference_steps):
+            last_pos = batch["ac/target_pos"][:, :, -1]
+            curr_pos = batch["ac/target_pos"]
+            target_types = batch["ac/target_type"]
+            pred_r, pred_theta = self.decoder( curr_pos
+                                            , target_types
+                                            , valid_mask
+                                            , fused_emb
+                                            , fused_emb_invalid)
+            
+            # pred_r = nucleus_sampling(pred_r[:, -1]).unflatten(dim=0, sizes=[n_batch * self.n_rollouts, n_agents])
+            # pred_theta = nucleus_sampling(pred_theta[:, -1]).unflatten(dim=0, sizes=[n_batch * self.n_rollouts, n_agents])
+            
+            # d_x, d_y = scalar_to_delta(self.decoder.r_bins[pred_r], self.decoder.theta_bins[pred_theta])
+            # # d_x = d_x.unflatten(dim=0, sizes=[n_batch * self.n_rollouts, n_agents])
+            # # d_y = d_y.unflatten(dim=0, sizes=[n_batch * self.n_rollouts, n_agents])
+            # pred = last_pos + torch.cat([d_x.unsqueeze(-1), d_y.unsqueeze(-1)], dim=-1)
+            # batch["ac/target_pos"] = torch.cat((batch["ac/target_pos"], pred.unsqueeze(2)), dim = -2)
+            pred_r = F.softmax(pred_r[:, -1], dim=-1).argmax(dim=1)
+            pred_theta = F.softmax(pred_theta[:, -1], dim=-1).argmax(dim=1)
+
+            d_x, d_y = scalar_to_delta(self.decoder.r_bins[pred_r], self.decoder.theta_bins[pred_theta])
+            d_x = d_x.unflatten(dim=0, sizes=[n_batch * self.n_rollouts, n_agents])
+            d_y = d_y.unflatten(dim=0, sizes=[n_batch * self.n_rollouts, n_agents])
+            pred = last_pos + torch.cat([d_x.unsqueeze(-1), d_y.unsqueeze(-1)], dim=-1)
+            batch["ac/target_pos"] = torch.cat((batch["ac/target_pos"], pred.unsqueeze(2)), dim = -2)
+
+        # print(f"post ac/target_pos: {batch["ac/target_pos"].shape}")
+        # print(f"ref pos: {batch['ref/pos'].shape}")
+        preds = batch["ac/target_pos"][:, :, self.decoder.step_current:, ]
+        # upsample from 5 Hz to 10 Hz
+        preds = F.interpolate(input=preds, size=(60, 2))#interpolate_trajectory(preds, self.sampling_step, self.device)
+        #print(preds.shape)
+        for n in range(n_batch):
+            mode_trajectories = preds[n * self.n_rollouts: (n + 1) * self.n_rollouts]
+            #mode_trajectories = non_maximum_suppression(mode_trajectories, .5)
+            mode_trajectories, mode_probs = cluster_rollouts(mode_trajectories, n_clusters=6)
+            # transform to global coordinate
+            trajs = torch_pos2global(mode_trajectories, batch['ref/pos'][n:n+1].repeat(6, 1, 1, 1), batch["ref/rot"][n:n+1].repeat(6, 1, 1, 1))
+            forecasted_trajs = trajs.cpu().numpy()  # Shape: (6, 8, 60, 2)
+            mode_probs = mode_probs.cpu().numpy()   # Shape: (6,)
+
+            object_ids = batch['history/agent/object_id'][n]
+            ref_ids = batch['ref/idx'][n]
+            track_ids = torch.gather(object_ids, 0, ref_ids).cpu().numpy().flatten()  # Shape: (n_agents,)
+
+            scenario_id = batch['scenario_id'][n]
+
+            # Populate scenario_trajectories: Mapping track_id -> (6, 60, 2)
+            scenario_trajectories = {
+                str(track_id): forecasted_trajs[:, i] for i, track_id in enumerate(track_ids)
+            }
+
+            # Store predictions
+            self.predictions[scenario_id] = (mode_probs, scenario_trajectories)
+
+        return 0
 
 class InputProjections(nn.Module):
     def __init__(
