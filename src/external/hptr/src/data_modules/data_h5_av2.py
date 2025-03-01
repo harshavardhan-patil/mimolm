@@ -25,10 +25,10 @@ class DatasetTrain(DatasetBase):
     """
 
     def __getitem__(self, idx: int) -> Dict[str, np.ndarray]:
-        idx = np.random.randint(self.dataset_len)
         idx_key = str(idx)
-        out_dict = {"episode_idx": idx}
         with h5py.File(self.filepath, "r", libver="latest", swmr=True) as hf:
+            out_dict = {"episode_idx": idx,
+                    "scenario_id": hf[idx_key].attrs["scenario_id"],}
             for k, _size in self.tensor_size.items():
                 if k in hf[idx_key]:
                     out_dict[k] = np.ascontiguousarray(hf[idx_key][k])
@@ -46,7 +46,7 @@ class DatasetTrain(DatasetBase):
 class DatasetVal(DatasetBase):
     # for validation.h5 and testing.h5
     def __getitem__(self, idx: int) -> Dict[str, np.ndarray]:
-        idx_key = str(np.random.randint(self.dataset_len))
+        idx_key = str(idx)
         with h5py.File(self.filepath, "r", libver="latest", swmr=True) as hf:
             out_dict = {
                 "episode_idx": idx,
@@ -212,7 +212,7 @@ class DataH5av2(LightningDataModule):
             batch_size=batch_size,
             num_workers=num_workers,
             pin_memory=False,
-            shuffle=False,
+            shuffle=True,
             drop_last=False,
             persistent_workers=True,
         )
