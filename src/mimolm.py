@@ -455,7 +455,7 @@ class MimoLM(pl.LightningModule):
             track_ids = batch['history/agent/object_id'][n][(batch['history/agent/role'][n][:, -1] == True).nonzero()]
             # Populate scenario_trajectories: Mapping track_id -> (6, 60, 2)
             scenario_trajectories = {
-                str(track_id): forecasted_trajs[:, i] for i, track_id in enumerate(track_ids)
+                str(track_id.item()): forecasted_trajs[:, i] for i, track_id in enumerate(track_ids)
             }
 
             # Store predictions
