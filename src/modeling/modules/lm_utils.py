@@ -188,3 +188,33 @@ def cluster_rollouts(trajectories, n_clusters=6):
     mode_probs = torch.bincount(cluster_labels, minlength=n_clusters) / len(cluster_labels)
 
     return cluster_centers, mode_probs
+
+
+def inverse_transform(pos_local: torch.Tensor, scenario_center: torch.Tensor, scenario_yaw: float, device) -> torch.Tensor:
+    """
+    Inverse transform local positions back to global coordinates
+    
+    Args:
+        pos_local (torch.Tensor): Local positions of shape (N, 2) or (N, 3).
+        scenario_center (torch.Tensor): The center point used for transformation, shape (2,).
+        scenario_yaw (float): The yaw angle used for rotation (in radians).
+    
+    Returns:
+        pos_global (torch.Tensor): Global positions of shape (N, 2) or (N, 3).
+    """
+    # Ensure pos_local is a 2D tensor
+    if pos_local.dim() == 1:
+        pos_local = pos_local.unsqueeze(0)  # Convert to (1, 2) or (1, 3)
+    
+    # Create a 2D rotation matrix for the inverse rotation
+    cos_yaw = torch.cos(scenario_yaw)
+    sin_yaw = torch.sin(scenario_yaw)
+    rotation_matrix = torch.tensor([[cos_yaw, -sin_yaw], [sin_yaw, cos_yaw]], dtype=pos_local.dtype, device=device)
+
+    # Apply the inverse rotation to the positions
+    pos_rotated = torch.matmul(pos_local[:, ], rotation_matrix.T)
+
+    # Apply the inverse translation
+    pos_global = pos_rotated + scenario_center[:2]
+
+    return pos_global

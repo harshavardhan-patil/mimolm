@@ -26,6 +26,7 @@ from src.modeling.modules.av2_metrics import (
     compute_world_misses,
     compute_world_collisions
 )
+from src.modeling.modules.lm_utils import inverse_transform
 
 class MimoLM(pl.LightningModule):
     def __init__(
@@ -403,7 +404,7 @@ class MimoLM(pl.LightningModule):
         batch["ac/target_type"] = batch["ac/target_type"].repeat_interleave(self.n_rollouts, 0)
         fused_emb = fused_emb.repeat_interleave(self.n_rollouts, 0)
         fused_emb_invalid = fused_emb_invalid.unflatten(0, (n_batch, n_agents)).repeat_interleave(self.n_rollouts, 0).flatten(0, 1)
-
+    
         for i in range(self.inference_steps):
             last_pos = batch["ac/target_pos"][:, :, -1]
             curr_pos = batch["ac/target_pos"]
@@ -438,18 +439,16 @@ class MimoLM(pl.LightningModule):
         preds = F.interpolate(input=preds, size=(60, 2))#interpolate_trajectory(preds, self.sampling_step, self.device)
         #print(preds.shape)
         for n in range(n_batch):
+            assert (batch['ac/target_role'][n:n+1, :, -1] == True).nonzero()[:, -1] == 0 
+
             mode_trajectories = preds[n * self.n_rollouts: (n + 1) * self.n_rollouts][:, 0,].unsqueeze(1)
             #mode_trajectories = non_maximum_suppression(mode_trajectories, .5)
             mode_trajectories, mode_probs = cluster_rollouts(mode_trajectories, n_clusters=6)
             # transform to global coordinate
             trajs = torch_pos2global(mode_trajectories, batch['ref/pos'][n:n+1, 0].repeat(6, 1, 1, 1), batch["ref/rot"][n:n+1, 0].repeat(6, 1, 1, 1))
-            forecasted_trajs = trajs.cpu().numpy()  # Shape: (6, 8, 60, 2)
+            trajs = inverse_transform(trajs, batch['scenario_center'][n], batch['scenario_yaw'][n], self.device)
+            forecasted_trajs = trajs.cpu().numpy()  # Shape: (6, 1, 60, 2)
             mode_probs = mode_probs.cpu().numpy()   # Shape: (6,)
-
-            assert (batch['ac/target_role'][n:n+1, :, -1] == True).nonzero()[:, -1] == 0
-            object_ids = batch['history/agent/object_id'][n]
-            ref_ids = batch['ref/idx'][n]
-            track_ids = torch.gather(object_ids, 0, ref_ids).cpu().numpy().flatten()  # Shape: (n_agents,)
 
             scenario_id = batch['scenario_id'][n]
             track_ids = batch['history/agent/object_id'][n][(batch['history/agent/role'][n][:, -1] == True).nonzero()]
