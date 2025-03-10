@@ -197,22 +197,34 @@ class DataH5av2(LightningDataModule):
             self.test_dataset = DatasetVal(self.path_test_h5, self.tensor_size_test)
 
     def train_dataloader(self) -> DataLoader[Any]:
-        return self._get_dataloader(self.train_dataset, self.batch_size, self.num_workers)
-
-    def val_dataloader(self) -> DataLoader[Any]:
-        return self._get_dataloader(self.val_dataset, self.batch_size, self.num_workers)
-
-    def test_dataloader(self) -> DataLoader[Any]:
-        return self._get_dataloader(self.test_dataset, self.batch_size, self.num_workers)
-
-    @staticmethod
-    def _get_dataloader(ds: Dataset, batch_size: int, num_workers: int) -> DataLoader[Any]:
         return DataLoader(
-            ds,
-            batch_size=batch_size,
-            num_workers=num_workers,
+            self.train_dataset,
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
             pin_memory=False,
             shuffle=True,
+            drop_last=False,
+            persistent_workers=True,
+        )
+
+    def val_dataloader(self) -> DataLoader[Any]:
+        return DataLoader(
+            self.val_dataset,
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            pin_memory=False,
+            shuffle=False,
+            drop_last=False,
+            persistent_workers=True,
+        )
+
+    def test_dataloader(self) -> DataLoader[Any]:
+        return DataLoader(
+            self.test_dataset,
+            batch_size=self.batch_size,
+            num_workers=self.num_workers,
+            pin_memory=False,
+            shuffle=False,
             drop_last=False,
             persistent_workers=True,
         )

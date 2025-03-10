@@ -245,8 +245,8 @@ class MimoLM(pl.LightningModule):
         forecasted_trajs = trajs.cpu()
         gt_trajs = gt_pos.cpu()
         for n in range(n_batch):
-            minade[n] = min(compute_world_ade(forecasted_trajs[n:n+1].permute(1, 0, 2, 3), gt_trajs[n]))
-            minfde[n] = min(compute_world_fde(forecasted_trajs[n:n+1].permute(1, 0, 2, 3), gt_trajs[n]))
+            minade[n] = min(compute_world_ade(forecasted_trajs[n:n+1, 0].unsqueeze(1).permute(1, 0, 2, 3), gt_trajs[n:n+1, 0]))
+            minfde[n] = min(compute_world_fde(forecasted_trajs[n:n+1, 0].unsqueeze(1).permute(1, 0, 2, 3), gt_trajs[n:n+1, 0]))
         
         self.log("MinADE", np.mean(minade), on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True, batch_size=n_batch) 
         self.log("MinFDE", np.mean(minfde), on_step=True, on_epoch=True, prog_bar=True, logger=True, sync_dist=True, batch_size=n_batch) 
@@ -315,16 +315,19 @@ class MimoLM(pl.LightningModule):
         briermindfde = [0] * n_batch
         #print(preds.shape)
         for n in range(n_batch):
-            mode_trajectories = preds[n * self.n_rollouts: (n + 1) * self.n_rollouts]
+            assert (batch['ac/target_role'][n:n+1, :, -1] == True).nonzero()[:, -1] == 0 
+            mode_trajectories = preds[n * self.n_rollouts: (n + 1) * self.n_rollouts][:, 0,].unsqueeze(1)
             #mode_trajectories = non_maximum_suppression(mode_trajectories, .5)
             mode_trajectories, mode_probs = cluster_rollouts(mode_trajectories, n_clusters=6)
             # transform to global coordinate
-            trajs = torch_pos2global(mode_trajectories, batch['ref/pos'][n:n+1].repeat(6, 1, 1, 1), batch["ref/rot"][n:n+1].repeat(6, 1, 1, 1))
-            trajs[~batch['gt/valid'][n:n+1].repeat(6, 1, 1)] = 0.0
-            gt_pos = torch_pos2global(batch["gt/pos"][n: n+1], batch['ref/pos'][n:n+1], batch["ref/rot"][n:n+1])
-            gt_pos[~batch['gt/valid'][n: n+1]] = 0.0
+            trajs = torch_pos2global(mode_trajectories, batch['ref/pos'][n:n+1, 0].repeat(6, 1, 1, 1), batch["ref/rot"][n:n+1, 0].repeat(6, 1, 1, 1))
+            trajs[~batch['gt/valid'][n:n+1, 0].repeat(6, 1, 1)] = 0.0
+            #print(f"trajs: {trajs}")
+            gt_pos = torch_pos2global(batch["gt/pos"][n: n+1, 0], batch['ref/pos'][n:n+1, 0], batch["ref/rot"][n:n+1, 0])
+            gt_pos[~batch['gt/valid'][n: n+1, 0]] = 0.0
+            #print(f"gt_pos: {gt_pos}")
             forecasted_trajs = trajs.cpu()
-            gt_trajs = gt_pos.squeeze(0).cpu()
+            gt_trajs = gt_pos.cpu()
             mode_probs = mode_probs.cpu()
             minade[n] = min(compute_world_ade(forecasted_trajs.permute(1, 0, 2, 3), gt_trajs))
             minfde[n] = min(compute_world_fde(forecasted_trajs.permute(1, 0, 2, 3), gt_trajs))
@@ -435,20 +438,21 @@ class MimoLM(pl.LightningModule):
         preds = F.interpolate(input=preds, size=(60, 2))#interpolate_trajectory(preds, self.sampling_step, self.device)
         #print(preds.shape)
         for n in range(n_batch):
-            mode_trajectories = preds[n * self.n_rollouts: (n + 1) * self.n_rollouts]
+            mode_trajectories = preds[n * self.n_rollouts: (n + 1) * self.n_rollouts][:, 0,].unsqueeze(1)
             #mode_trajectories = non_maximum_suppression(mode_trajectories, .5)
             mode_trajectories, mode_probs = cluster_rollouts(mode_trajectories, n_clusters=6)
             # transform to global coordinate
-            trajs = torch_pos2global(mode_trajectories, batch['ref/pos'][n:n+1].repeat(6, 1, 1, 1), batch["ref/rot"][n:n+1].repeat(6, 1, 1, 1))
+            trajs = torch_pos2global(mode_trajectories, batch['ref/pos'][n:n+1, 0].repeat(6, 1, 1, 1), batch["ref/rot"][n:n+1, 0].repeat(6, 1, 1, 1))
             forecasted_trajs = trajs.cpu().numpy()  # Shape: (6, 8, 60, 2)
             mode_probs = mode_probs.cpu().numpy()   # Shape: (6,)
 
+            assert (batch['ac/target_role'][n:n+1, :, -1] == True).nonzero()[:, -1] == 0
             object_ids = batch['history/agent/object_id'][n]
             ref_ids = batch['ref/idx'][n]
             track_ids = torch.gather(object_ids, 0, ref_ids).cpu().numpy().flatten()  # Shape: (n_agents,)
 
             scenario_id = batch['scenario_id'][n]
-
+            track_ids = batch['history/agent/object_id'][n][(batch['history/agent/role'][n][:, -1] == True).nonzero()]
             # Populate scenario_trajectories: Mapping track_id -> (6, 60, 2)
             scenario_trajectories = {
                 str(track_id): forecasted_trajs[:, i] for i, track_id in enumerate(track_ids)
@@ -457,7 +461,7 @@ class MimoLM(pl.LightningModule):
             # Store predictions
             self.predictions[scenario_id] = (mode_probs, scenario_trajectories)
 
-        return 0
+        return None
 
 class InputProjections(nn.Module):
     def __init__(
