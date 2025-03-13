@@ -9,6 +9,7 @@ from typing import Tuple
 from torch import nn, Tensor
 from einops import rearrange
 from omegaconf import DictConfig, OmegaConf
+from torch.optim.lr_scheduler import LambdaLR
 
 from src.external.hptr.src.models.modules.mlp import MLP
 from src.external.hptr.src.models.modules.transformer import TransformerBlock
@@ -40,6 +41,9 @@ class MimoLM(pl.LightningModule):
         dec_dim = 256,
         n_heads = 4,
         n_layers = 4,
+        warmup_steps = 5,
+        gamma = 0.5,
+        lr_step_size = 5,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -50,6 +54,9 @@ class MimoLM(pl.LightningModule):
         self.inference_steps = 60 // self.sampling_step # AV2 has 60 future timesteps
         self.inference_start = 50 // self.sampling_step
         self.learning_rate = learning_rate
+        self.warmup_steps = warmup_steps
+        self.gamma = gamma
+        self.lr_step_size = lr_step_size
 
         self.preprocessor = nn.Sequential(OrderedDict([
             ('pre_1', AgentCentricPreProcessing(sampling_rate = self.sampling_rate,
@@ -110,6 +117,14 @@ class MimoLM(pl.LightningModule):
         
         self.predictions = {}
 
+    def lr_lambda(self, epoch):
+        warmup_steps = self.warmup_steps
+        gamma = self.gamma
+        lr_step_size = self.lr_step_size
+        if epoch < warmup_steps:
+            return (epoch + 1) / warmup_steps
+        else:
+            return gamma ** ((epoch - warmup_steps) // lr_step_size)
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW([
@@ -119,9 +134,7 @@ class MimoLM(pl.LightningModule):
             , lr=self.learning_rate
             , weight_decay=0.6)
         lr_scheduler = {
-            "scheduler": torch.optim.lr_scheduler.StepLR(optimizer
-                                                         , step_size=5
-                                                         , gamma=0.9),
+            "scheduler": LambdaLR(optimizer, lr_lambda=self.lr_lambda),
             "interval": "epoch",
             # How many epochs/steps should pass between calls to `scheduler.step()`. 1 corresponds to updating the learning rate after every epoch/step.
             "frequency": 1,
